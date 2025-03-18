@@ -1,4 +1,4 @@
-// include/core/orderbook.hpp
+// orderbook.hpp
 
 #ifndef ORDERBOOK_HPP
 #define ORDERBOOK_HPP
@@ -9,6 +9,7 @@
 #include <thread>
 #include <atomic>
 #include <nlohmann/json.hpp>
+#include "engine/triangle_scanner.hpp"
 
 struct OrderBookEntry {
     double bid;
@@ -17,7 +18,7 @@ struct OrderBookEntry {
 
 class OrderBookManager {
 public:
-    OrderBookManager();
+    OrderBookManager(TriangleScanner* scanner);
     ~OrderBookManager();
 
     void start(const std::string& symbol);
@@ -30,7 +31,11 @@ private:
     std::unordered_map<std::string, OrderBookEntry> books_;
     std::unordered_map<std::string, std::mutex> mutexes_;
     std::unordered_map<std::string, std::thread> threads_;
+
+    std::mutex globalMutex_; 
     std::atomic<bool> running_;
+
+    TriangleScanner* scanner_; // pointer
 };
 
-#endif // ORDERBOOK_HPP
+#endif

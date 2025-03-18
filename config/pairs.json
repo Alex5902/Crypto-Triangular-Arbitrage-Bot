@@ -1,0 +1,11 @@
+[
+    {
+      "base": "BTC",
+      "path": ["BTCUSDT", "ETHUSDT", "ETHBTC"]
+    },
+    {
+      "base": "USDT",
+      "path": ["ETHUSDT", "ETHBTC", "BTCUSDT"]
+    }
+  ]
+  
