@@ -1,4 +1,5 @@
 #include "engine/triangle_scanner.hpp"
+#include "engine/simulator.hpp" 
 #include "core/orderbook.hpp"
 #include <iostream>
 #include <fstream>
@@ -58,6 +59,7 @@ void TriangleScanner::loadTrianglesFromFile(const std::string& filepath) {
 }
 
 void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
+    auto t0 = std::chrono::steady_clock::now();
     std::cout << "[CALL] scanTrianglesForSymbol triggered for: " << symbol << "\n";
     if (!obm_) return;
 
@@ -118,6 +120,10 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
             simulator_->printWallet();
         }
     }
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+    std::cout << "[SCANNER LATENCY] symbol=" << symbol << " took " << ms << " ms\n";
 }
 
 double TriangleScanner::calculateProfit(const Triangle& tri) {

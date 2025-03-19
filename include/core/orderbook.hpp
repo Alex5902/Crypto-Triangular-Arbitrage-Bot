@@ -6,14 +6,13 @@
 #include <unordered_map>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <vector>
 #include <nlohmann/json.hpp>
 
-// Forward declare to avoid circular includes
-// We'll only store a pointer, no methods from triangle_scanner are called here
-class TriangleScanner;
+class TriangleScanner; // forward declare to avoid circular includes
 
-// The full depth struct
+// For full depth
 struct OrderBookLevel {
     double price;
     double quantity;
@@ -26,8 +25,7 @@ struct OrderBookData {
 
 class OrderBookManager {
 public:
-    // Provide a default constructor or explicit constructor if you want
-    // Possibly accept a pointer in the constructor if needed
+    // We'll allow a default or single-arg constructor
     explicit OrderBookManager(TriangleScanner* scanner = nullptr);
     ~OrderBookManager();
 
@@ -38,8 +36,17 @@ public:
     OrderBookData getOrderBook(const std::string& symbol);
 
 private:
-    void connectWebSocket(const std::string& symbol);
+    // We store connection logic in a separate function with a backoff param
+    void connectWebSocket(const std::string& symbol, int backoffSeconds=1);
+
+    // We'll handle messages, plus close/fail handlers, in separate private methods
     void onMessage(const std::string& symbol, const std::string& payload);
+    void onFail(const std::string& symbol, int backoff);
+    void onClose(const std::string& symbol, int backoff);
+
+    // We track last received message time for inactivity check
+    // If desired, we can do a separate thread that checks for inactivity
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastMsgTime_;
 
     // map symbol -> full depth
     std::unordered_map<std::string, OrderBookData> books_;
@@ -53,7 +60,7 @@ private:
     std::mutex globalMutex_;
     std::atomic<bool> running_;
 
-    TriangleScanner* scanner_; // pointer only, no definition needed
+    TriangleScanner* scanner_;
 };
 
 #endif // ORDERBOOK_HPP

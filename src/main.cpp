@@ -1,40 +1,43 @@
+#include "core/wallet.hpp"
+#include "exchange/i_exchange_executor.hpp"
+#include "exchange/binance_dry_executor.hpp"
+#include "engine/simulator.hpp"
 #include "engine/triangle_scanner.hpp"
 #include "core/orderbook.hpp"
-#include "engine/simulator.hpp"    // if you want to create a simulator here
-#include <iostream>
-#include <thread>
 
-int main(){
-    // 1) Create the scanner
+int main() {
+    // create the wallet
+    Wallet wallet;
+    wallet.setBalance("BTC", 0.02);
+    wallet.setBalance("ETH", 0.5);
+    wallet.setBalance("USDT", 200.0);
+
+    // create the dry executor
+    BinanceDryExecutor dryExec(/*fillRatio=*/1.0, /*latency=*/150, /*mockPrice=*/28000.0);
+
+    // create simulator
+    Simulator sim("sim_log.csv",
+                  /*fee=*/0.001, /*slippage=*/0.005,
+                  /*volumeLimit=*/1.0, /*minFill=*/0.2,
+                  &wallet, &dryExec);
+
+    // create scanner, obm, etc.
     TriangleScanner scanner;
-
-    // 2) Create OBM with pointer to scanner
     OrderBookManager obm(&scanner);
-
-    // 3) Let scanner know about obm
     scanner.setOrderBookManager(&obm);
 
-    // Suppose we want 0.1% fee, 0.5% slippage tolerance, 0.2 minFill ratio, 1.0 volume limit (in base)
-    Simulator sim("sim_log.csv", /*fee=*/0.001, /*slippage=*/0.005, /*volumeLimit=*/1.0, /*minFill=*/0.2);
+    // pass simulator to scanner
+    scanner.setSimulator(&sim);
 
-    // Start with 0.02 BTC, 0.5 ETH, 200 USDT
-    sim.setInitialBalances(0.02, 0.5, 200.0);
-
-    scanner.setSimulator(&sim); // pass simulator pointer to scanner
-
-    // Load triangle config
+    // load pairs
     scanner.loadTrianglesFromFile("config/pairs.json");
     scanner.setMinProfitThreshold(0.0);
 
-    // scanner.scanTrianglesForSymbol("BTCUSDT");
-
-    std::cout << "Bot running. Press Ctrl+C to quit.\n";
-
-    // block forever
+    // run
     while(true) {
-        std::this_thread::sleep_for(std::chrono::seconds(60));
-
-        sim.printWallet();
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+        wallet.printAll();
     }
+
     return 0;
 }

@@ -8,9 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCES
     src/main.cpp
     src/core/orderbook.cpp
+    src/core/wallet.cpp   
     # src/core/trade_utils.cpp
     src/engine/triangle_scanner.cpp
     src/engine/simulator.cpp
+    src/exchange/binance_dry_executor.cpp
 )
 
 # Create the executable

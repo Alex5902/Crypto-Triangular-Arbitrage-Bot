@@ -1,39 +1,37 @@
 #include "engine/simulator.hpp"
-#include "engine/triangle_scanner.hpp" // might not strictly need this
+#include "engine/triangle_scanner.hpp"
 #include "core/orderbook.hpp"
+#include "core/wallet.hpp"
+#include "exchange/i_exchange_executor.hpp"
 #include <iostream>
+#include <sstream>
+#include <fstream>
 #include <iomanip>
 #include <chrono>
 #include <ctime>
-#include <cmath>
+
+#include <cmath> // for min, etc.
 
 Simulator::Simulator(const std::string& logFileName,
                      double feePercent,
                      double slippageTolerance,
                      double volumeLimit,
-                     double minFillRatio)
-    : logFileName_(logFileName)
-    , feePercent_(feePercent)
-    , slippageTolerance_(slippageTolerance)
-    , volumeLimit_(volumeLimit)
-    , minFillRatio_(minFillRatio)
+                     double minFillRatio,
+                     Wallet* sharedWallet,
+                     IExchangeExecutor* executor)
+  : logFileName_(logFileName)
+  , feePercent_(feePercent)
+  , slippageTolerance_(slippageTolerance)
+  , volumeLimit_(volumeLimit)
+  , minFillRatio_(minFillRatio)
+  , wallet_(sharedWallet)
+  , executor_(executor)
 {
-    // We'll start with an empty log if you want:
+    // optionally start fresh log
     std::ofstream file(logFileName_, std::ios::app);
     if (file.is_open()) {
         file << "timestamp,path,start_val,end_val,profit_percent\n";
     }
-
-    // Initialize wallet to zero by default
-    wallet_ = {0.0, 0.0, 0.0};
-}
-
-void Simulator::setInitialBalances(double btc, double eth, double usdt) {
-    wallet_.btc  = btc;
-    wallet_.eth  = eth;
-    wallet_.usdt = usdt;
-    std::cout << "[SIM] Initial wallet => BTC:" << btc
-              << " ETH:" << eth << " USDT:" << usdt << "\n";
 }
 
 bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
@@ -41,205 +39,192 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob2,
                                              const OrderBookData& ob3)
 {
-    // We'll handle only 3-step triangle: e.g. BTCUSDT -> ETHUSDT -> ETHBTC?
-    // Actually you said no reversed nonsense, so let's do 2 known patterns:
-    //  1) "BTCUSDT" => "ETHUSDT" => "ETHBTC"
-    //  2) "ETHUSDT" => "ETHBTC" => "BTCUSDT"
-    // but let's keep it simpler: you do "BTCUSDT->ETHUSDT->ETHBTC" or
-    // "ETHUSDT->ETHBTC->BTCUSDT".
+    // approximate old value in USDT
+    double b1 = (ob1.bids.empty()?0.0 : ob1.bids[0].price);
+    double b2 = (ob2.bids.empty()?0.0 : ob2.bids[0].price);
+    // If tri has 3rd path => ob3...
+    double b3 = (ob3.bids.empty()?0.0 : ob3.bids[0].price);
 
-    // We'll do a snapshot of the wallet for startVal
-    double oldValUSDT = wallet_.btc * ob1.bids[0].price // rough convert BTC->USDT
-                      + wallet_.eth * ob2.bids[0].price // rough convert ETH->USDT
-                      + wallet_.usdt;
+    double oldValUSDT = 
+        wallet_->getFreeBalance("BTC") * b1 +
+        wallet_->getFreeBalance("ETH") * b2 +
+        wallet_->getFreeBalance("USDT");
 
-    // 1) doOneStepWithWallet(...) for tri.path[0]
-    // 2) doOneStepWithWallet(...) for tri.path[1]
-    // 3) doOneStepWithWallet(...) for tri.path[2]
+    // start transaction
+    auto tx = wallet_->beginTransaction();
 
-    // We'll store the top-of-book price for each path step (for slippage tolerance)
-    // The "top-of-book" might be for sells or buys. We'll do a quick check:
-    double topPrice1 = (tri.path[0].find("USDT") != std::string::npos)
-                       ? (ob1.bids.empty()?0.0:ob1.bids[0].price)
-                       : 0.0; // or you can do a more advanced approach
-    double topPrice2 = (tri.path[1].find("USDT") != std::string::npos)
-                       ? (ob2.bids.empty()?0.0:ob2.bids[0].price)
-                       : 0.0;
-    double topPrice3 = (tri.path[2].find("USDT") != std::string::npos)
-                       ? (ob3.bids.empty()?0.0:ob3.bids[0].price)
-                       : 0.0;
+    // leg1
+    double topPrice1 = (ob1.bids.empty()?0.0 : ob1.bids[0].price);
+    if (!doLeg(tx, tri.path[0], topPrice1)) {
+        std::cout << "[SIM] Leg1 fail, rollback\n";
+        wallet_->rollbackTransaction(tx);
+        return false;
+    }
+    // leg2
+    double topPrice2 = (ob2.bids.empty()?0.0 : ob2.bids[0].price);
+    if (!doLeg(tx, tri.path[1], topPrice2)) {
+        std::cout << "[SIM] Leg2 fail, rollback\n";
+        wallet_->rollbackTransaction(tx);
+        return false;
+    }
+    // leg3
+    double topPrice3 = (ob3.bids.empty()?0.0 : ob3.bids[0].price);
+    if (!doLeg(tx, tri.path[2], topPrice3)) {
+        std::cout << "[SIM] Leg3 fail, rollback\n";
+        wallet_->rollbackTransaction(tx);
+        return false;
+    }
 
-    bool ok = doOneStepWithWallet(tri.path[0], topPrice1, volumeLimit_);
-    if (!ok) return false;
-    ok = doOneStepWithWallet(tri.path[1], topPrice2, volumeLimit_);
-    if (!ok) return false;
-    ok = doOneStepWithWallet(tri.path[2], topPrice3, volumeLimit_);
-    if (!ok) return false;
+    // commit
+    wallet_->commitTransaction(tx);
 
-    // final value in USDT
-    double newValUSDT = wallet_.btc * (ob3.bids.empty()?0.0:ob3.bids[0].price)
-                      + wallet_.eth * (ob2.bids.empty()?0.0:ob2.bids[0].price)
-                      + wallet_.usdt;
+    // measure newVal
+    double nb1 = (ob3.bids.empty()?0.0 : ob3.bids[0].price);
+    double nb2 = (ob2.bids.empty()?0.0 : ob2.bids[0].price);
+    double newVal = 
+        wallet_->getFreeBalance("BTC") * nb1 +
+        wallet_->getFreeBalance("ETH") * nb2 +
+        wallet_->getFreeBalance("USDT");
 
     double profitPercent = 0.0;
     if (oldValUSDT > 0.0) {
-        profitPercent = ((newValUSDT - oldValUSDT) / oldValUSDT) * 100.0;
+        profitPercent = ((newVal - oldValUSDT)/ oldValUSDT)*100.0;
     }
 
-    // Build path name
-    std::stringstream pathStr;
-    for (size_t i = 0; i < tri.path.size(); i++) {
-        if (i > 0) pathStr << "->";
-        pathStr << tri.path[i];
+    // build path
+    std::stringstream ps;
+    for (size_t i=0; i< tri.path.size(); i++) {
+        if (i>0) ps << "->";
+        ps << tri.path[i];
     }
+    logTrade(ps.str(), oldValUSDT, newVal, profitPercent);
 
-    logTrade(pathStr.str(), oldValUSDT, newValUSDT, profitPercent);
-
-    std::cout << "[SIM] Traded triangle: " << pathStr.str()
+    std::cout << "[SIM] Traded triangle: " << ps.str()
               << " oldVal=" << oldValUSDT
-              << " newVal=" << newValUSDT
+              << " newVal=" << newVal
               << " profit=" << profitPercent << "%\n";
-
     return true;
 }
 
-double Simulator::simulateTrade(const Triangle& tri,
-                                double currentBalance,
-                                double bid1, double ask1,
-                                double bid2, double ask2,
-                                double bid3, double ask3)
+bool Simulator::doLeg(WalletTransaction& tx,
+                      const std::string& pairName,
+                      double topOfBookPrice)
 {
-    // Old approach if you still want to keep it
-    return 0.0;
-}
+    if (!executor_) {
+        std::cerr << "[SIM] No exchange executor set!\n";
+        return false;
+    }
+    // decide side
+    // if "BTCUSDT" => SELL BTC
+    // if "ETHUSDT" => BUY ETH
+    // etc. We'll do 2 examples:
 
-// The big difference: doOneStepWithWallet modifies wallet_ (selling or buying)
-bool Simulator::doOneStepWithWallet(const std::string& pairName,
-                                    double topOfBookPrice,
-                                    double volumeLimit)
-{
-    // We'll check if pair is BTCUSDT or ETHUSDT
     if (pairName == "BTCUSDT") {
-        // We hold BTC, want to SELL up to "volumeLimit" or what we have
-        double canSell = std::min(wallet_.btc, volumeLimit);
-        if (canSell <= 0.0) {
+        double freeBtc = wallet_->getFreeBalance("BTC");
+        double canSell = std::min(freeBtc, volumeLimit_);
+        if (canSell<=0.0) {
             std::cout << "[SIM] No BTC to sell.\n";
             return false;
         }
 
-        // partial fill from the depth
-        double actualPrice=0.0, filledVol=0.0;
-        double proceeds = fillSell(/* your orderbook data??? we need it here! */
-                                   // but right now we don't have it. So let's store it somewhere
-                                   // or pass it in? We'll store them temporarily above. 
-                                   // For demonstration, let's say fillSell(...) from some global? 
-                                   // We'll just do a mock approach to show the pattern.
-                                   {}, // empty for now
-                                   canSell,
-                                   actualPrice,
-                                   filledVol);
+        // place market SELL
+        auto t0 = std::chrono::high_resolution_clock::now();
+        OrderResult res = executor_->placeMarketOrder("BTCUSDT", OrderSide::SELL, canSell);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
 
-        // This is a problem, we see we can't call fillSell if we don't have the bids here.
-        // We can do the approach of storing them in a map. 
-        // For this demonstration, let's assume we do that. 
-        // We'll do a simpler approach: proceed with topOfBookPrice only. 
-        // We'll do next version:
-
-        // We'll do an approximate approach:
-        // you can do partial fill from top-of-book, ignoring multi-level logic for demonstration:
-        proceeds = canSell * topOfBookPrice;
-        filledVol = canSell;
-        actualPrice = topOfBookPrice; // pretend no slippage
-
-        // slippage tolerance check
-        // if actualPrice < topOfBookPrice * (1.0 - slippageTolerance_) => fail
-        // or if actualPrice > topOfBookPrice * (1.0 + slippageTolerance_) => fail
-        if (actualPrice < topOfBookPrice * (1.0 - slippageTolerance_) ||
-            actualPrice > topOfBookPrice * (1.0 + slippageTolerance_)) {
-            std::cout << "[SIM] Slippage too high. Aborting.\n";
+        if (!res.success || res.filledQuantity<=0.0) {
+            std::cout << "[SIM] SELL fail or no fill\n";
             return false;
         }
-
-        // apply fee
-        double netProceeds = proceeds * (1.0 - feePercent_);
-
         // check fill ratio
-        double fillRatio = (filledVol / canSell);
+        double fillRatio = res.filledQuantity / canSell;
         if (fillRatio < minFillRatio_) {
-            std::cout << "[SIM] Not enough liquidity, fill ratio " << fillRatio << " < " << minFillRatio_ << "\n";
+            std::cout << "[SIM] fill ratio < minFill. Aborting.\n";
+            return false;
+        }
+        // slippage check if you want => compare res.avgPrice with topOfBookPrice
+        double slip = std::fabs(res.avgPrice - topOfBookPrice)/ topOfBookPrice;
+        if (slip > slippageTolerance_) {
+            std::cout << "[SIM] slippage too high. " << slip << "\n";
             return false;
         }
 
-        // update wallet
-        wallet_.btc -= filledVol;
-        wallet_.usdt += netProceeds;
-        std::cout << "[SIM] Sold " << filledVol << " BTC => " << netProceeds << " USDT\n";
+        // applyChange => reduce BTC, add USDT
+        double netProceeds = res.costOrProceeds*(1.0 - feePercent_);
+
+        bool ok1 = wallet_->applyChange(tx, "BTC", -(res.filledQuantity), 0.0);
+        if (!ok1) return false;
+        bool ok2 = wallet_->applyChange(tx, "USDT", netProceeds, 0.0);
+        if (!ok2) return false;
+
+        std::cout << "[SIM] SELL " << res.filledQuantity << " BTC => " << netProceeds
+                  << " USDT in " << ms << " ms\n";
         return true;
     }
     else if (pairName == "ETHUSDT") {
-        // We hold USDT, want to buy up to volumeLimit of ETH
-        // Actually we need to see how much USDT we have
-        double usdtAvail = wallet_.usdt;
-        if (usdtAvail <= 0.0) {
-            std::cout << "[SIM] No USDT to buy ETH.\n";
+        double freeUsdt = wallet_->getFreeBalance("USDT");
+        if (freeUsdt<=0.0) {
+            std::cout << "[SIM] No USDT.\n";
             return false;
         }
-        // We won't exceed volumeLimit in base terms
-        // if we want to buy 'volumeLimit' ETH at topOfBookPrice => cost= volumeLimit*topOfBookPrice
-        double costMax = volumeLimit * topOfBookPrice;
-        double cost = std::min(usdtAvail, costMax);
+        double costMax = volumeLimit_ * topOfBookPrice;
+        double spend = std::min(freeUsdt, costMax);
+        if (spend<=0.0) return false;
 
-        // approximate partial fill
-        double actualPrice=topOfBookPrice;
-        if (actualPrice < topOfBookPrice*(1.0 - slippageTolerance_) ||
-            actualPrice > topOfBookPrice*(1.0 + slippageTolerance_)) {
-            std::cout << "[SIM] Slippage too high. Aborting.\n";
+        // place market BUY
+        // quantity in base => spend / price
+        double baseQty = spend / topOfBookPrice;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        OrderResult res = executor_->placeMarketOrder("ETHUSDT", OrderSide::BUY, baseQty);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+
+        if (!res.success || res.filledQuantity<=0.0) {
+            std::cout << "[SIM] BUY fail or no fill\n";
             return false;
         }
-
-        double baseBuy = cost / actualPrice; // how many ETH
-        // fee
-        baseBuy *= (1.0 - feePercent_);
-
-        // fill ratio check: e.g. if cost < costMax, means partial fill
-        double fillRatio = cost / costMax;
+        double fillRatio = res.filledQuantity / baseQty;
         if (fillRatio < minFillRatio_) {
-            std::cout << "[SIM] Not enough liquidity, fill ratio " << fillRatio << " < " << minFillRatio_ << "\n";
+            std::cout << "[SIM] fill ratio < min.\n";
+            return false;
+        }
+        double slip = std::fabs(res.avgPrice - topOfBookPrice)/topOfBookPrice;
+        if (slip> slippageTolerance_) {
+            std::cout << "[SIM] slippage too high.\n";
             return false;
         }
 
-        // update wallet
-        wallet_.usdt -= cost;
-        wallet_.eth  += baseBuy;
-        std::cout << "[SIM] Bought " << baseBuy << " ETH using " << cost << " USDT\n";
+        // final cost = res.filledQuantity * res.avgPrice
+        double costUsed = res.costOrProceeds; 
+        double netCost = costUsed*(1.0 + feePercent_); // if you want to interpret fees differently
+
+        bool ok1 = wallet_->applyChange(tx, "USDT", -netCost, 0.0);
+        if (!ok1) return false;
+        bool ok2 = wallet_->applyChange(tx, "ETH", res.filledQuantity, 0.0);
+        if (!ok2) return false;
+
+        std::cout << "[SIM] BUY " << res.filledQuantity << " ETH cost=" << netCost
+                  << " in " << ms << " ms\n";
         return true;
     }
-    // ...
-    std::cout << "[SIM] Pair " << pairName << " not recognized, skipping.\n";
+    // else e.g. "ETHBTC" -> do the logic. If path is reversed, do your approach
+
+    std::cout << "[SIM] unknown pair: " << pairName << "\n";
     return false;
 }
 
-// For a real partial fill approach with multi-level logic, define fillSell(...) that uses bids array
-// For demonstration, you see how we'd pass & fill volumes.
-double Simulator::fillSell(const std::vector<OrderBookLevel>& /*bids*/,
-                           double /*volumeToSell*/,
-                           double& /*actualPrice*/,
-                           double& /*filledVolume*/)
+double Simulator::simulateTrade(const Triangle& /*tri*/,
+                                double /*currentBalance*/,
+                                double /*bid1*/, double /*ask1*/,
+                                double /*bid2*/, double /*ask2*/,
+                                double /*bid3*/, double /*ask3*/)
 {
-    // In a real code, you'd sum across the bids array 
-    // until you run out of volumeToSell or levels. 
-    // Then compute actualPrice as volume-weighted fill price, etc.
-    // We'll skip the full detail since we used a simpler doOneStepWithWallet approach.
     return 0.0;
 }
 
-double Simulator::fillBuy(const std::vector<OrderBookLevel>& /*asks*/,
-                          double /*quoteAmount*/,
-                          double& /*actualPrice*/,
-                          double& /*filledVolume*/)
-{
-    // same partial fill logic, skip for brevity here
-    return 0.0;
+void Simulator::printWallet() const {
+    wallet_->printAll();
 }
 
 void Simulator::logTrade(const std::string& path,
@@ -248,10 +233,7 @@ void Simulator::logTrade(const std::string& path,
                          double profitPercent)
 {
     std::ofstream file(logFileName_, std::ios::app);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open sim log file: " << logFileName_ << std::endl;
-        return;
-    }
+    if (!file.is_open()) return;
     auto now = std::chrono::system_clock::now();
     auto now_c = std::chrono::system_clock::to_time_t(now);
 
@@ -260,13 +242,4 @@ void Simulator::logTrade(const std::string& path,
          << startVal << ","
          << endVal << ","
          << profitPercent << "\n";
-
-    file.close();
-}
-
-void Simulator::printWallet() const {
-    std::cout << "[SIM WALLET] BTC:" << wallet_.btc
-              << "  ETH:" << wallet_.eth
-              << "  USDT:" << wallet_.usdt
-              << std::endl;
 }
