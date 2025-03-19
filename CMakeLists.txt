@@ -8,8 +8,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCES
     src/main.cpp
     src/core/orderbook.cpp
-    src/core/trade_utils.cpp
+    # src/core/trade_utils.cpp
     src/engine/triangle_scanner.cpp
+    src/engine/simulator.cpp
 )
 
 # Create the executable
