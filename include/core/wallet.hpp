@@ -32,22 +32,16 @@ public:
     // total
     double getTotalBalance(const std::string& asset) const;
 
-    // Start a multi-leg transaction
     WalletTransaction beginTransaction();
 
-    // applyChange => modifies wallet in place if valid
     bool applyChange(WalletTransaction& tx,
                      const std::string& asset,
                      double deltaBalance,
                      double deltaLocked);
 
-    // commit => finalize
     bool commitTransaction(WalletTransaction& tx);
-
-    // rollback => revert changes
     void rollbackTransaction(WalletTransaction& tx);
 
-    // debug
     void printAll() const;
 
 private:

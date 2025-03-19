@@ -5,13 +5,11 @@
 #include <string>
 #include <unordered_map>
 #include <future>
-
 #include "core/thread_pool.hpp"
-#include "core/triangle.hpp"  // new separate file for struct Triangle
-
-// Forward-declare, do NOT include "simulator.hpp" here
-class Simulator;
+#include "core/triangle.hpp"  // so we have struct Triangle
+// forward-declare
 class OrderBookManager;
+class Simulator;
 
 class TriangleScanner {
 public:
@@ -25,8 +23,6 @@ public:
     double calculateProfit(const Triangle& tri);
 
     void setMinProfitThreshold(double thresh) { minProfitThreshold_ = thresh; }
-    
-    // Just forward declare "class Simulator" above, so you can hold a pointer
     void setSimulator(Simulator* sim) { simulator_ = sim; }
 
 private:
@@ -38,7 +34,6 @@ private:
     double minProfitThreshold_{0.0};
     ThreadPool pool_{4};
 
-    // pointer only, we do not need the full definition here
     Simulator* simulator_{nullptr};
 };
 

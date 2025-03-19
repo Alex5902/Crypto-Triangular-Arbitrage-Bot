@@ -3,6 +3,9 @@
 
 #include <string>
 #include <fstream>
+#include <map>
+#include <mutex>
+
 #include "core/triangle.hpp"
 #include "core/orderbook.hpp"
 #include "core/wallet.hpp"
@@ -10,10 +13,9 @@
 
 /**
  * The simulator uses:
- *  - a pointer to your atomic Wallet
- *  - a pointer to an IExchangeExecutor (dry or real)
- *
- * It executes multi-leg trades in a transaction. If a leg fails => rollback.
+ *  - pointer to your atomic Wallet
+ *  - pointer to an IExchangeExecutor (dry or real)
+ *  - a global map of asset locks to avoid concurrency issues across triangles
  */
 class Simulator {
 public:
@@ -40,14 +42,28 @@ public:
     void printWallet() const;
 
 private:
+    // Logging for entire 3-leg trade
     void logTrade(const std::string& path,
                   double startVal,
                   double endVal,
                   double profitPercent);
 
+    // Helper for each leg (BTCUSDT, etc.)
     bool doLeg(WalletTransaction& tx, 
                const std::string& pairName,
                double topOfBookPrice);
+
+    // Additional: log details about each leg
+    void logLeg(const std::string& pairName,
+                const std::string& side,
+                double requestedQty,
+                double filledQty,
+                double fillRatio,
+                double slipPct,
+                double latencyMs);
+
+    // figure out which assets are used by "BTCUSDT" => lock "BTC"+"USDT", etc.
+    std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
 
 private:
     std::string logFileName_;
@@ -57,7 +73,11 @@ private:
     double minFillRatio_;
 
     Wallet* wallet_;
-    IExchangeExecutor* executor_; // can be a DryExecutor or real
+    IExchangeExecutor* executor_;
+
+    // Global locks: asset -> mutex
+    // so if we trade BTCUSDT, we lock "BTC" and "USDT" for the trade's duration
+    static std::map<std::string, std::mutex> assetLocks_;
 };
 
 #endif // SIMULATOR_HPP

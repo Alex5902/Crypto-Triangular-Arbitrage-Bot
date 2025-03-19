@@ -94,7 +94,7 @@ void Wallet::rollbackTransaction(WalletTransaction& tx) {
         balances_[ch.asset] -= ch.deltaBalance;
         locked_[ch.asset]   -= ch.deltaLocked;
         if (balances_[ch.asset] < 0.0) balances_[ch.asset] = 0.0;
-        if (locked_[ch.asset] < 0.0)   locked_[ch.asset] = 0.0;
+        if (locked_[ch.asset] < 0.0)   locked_[ch.asset]   = 0.0;
     }
 }
 
