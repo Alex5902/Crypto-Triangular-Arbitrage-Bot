@@ -9,6 +9,9 @@
  *  - baseLatencyMs: “network + engine” latency
  *  - mockPrice: baseline fill price
  *  - slippageBps: basis points of slippage per 1% of the order 
+ *
+ * Now also randomly simulates network failures and partial fills
+ * to demonstrate the new retry logic in Simulator.
  */
 class BinanceDryExecutor : public IExchangeExecutor {
 public:

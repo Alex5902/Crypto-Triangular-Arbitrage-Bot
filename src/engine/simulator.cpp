@@ -7,6 +7,7 @@
 #include <chrono>
 #include <ctime>
 #include <cmath>
+#include <thread>
 
 std::map<std::string, std::mutex> Simulator::assetLocks_;
 
@@ -35,8 +36,6 @@ Simulator::Simulator(const std::string& logFileName,
     // Optionally start fresh log (for the summary of 3-leg trades)
     std::ofstream file(logFileName_, std::ios::app);
     if (file.is_open()) {
-        // If you want to ensure only one header ever:
-        // You can track a static bool, but be careful about multiple runs.
         file << "timestamp,path,start_val,end_val,profit_percent\n";
     }
 }
@@ -67,7 +66,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
             }
         }
     }
-    // Now lock them in alphabetical order to avoid deadlock
+    // sort & lock them to avoid deadlock
     std::sort(allAssets.begin(), allAssets.end());
     std::vector<std::unique_lock<std::mutex>> lockGuards;
     lockGuards.reserve(allAssets.size());
@@ -78,21 +77,23 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     // 3) start transaction
     auto tx = wallet_->beginTransaction();
 
-    // leg1
-    double topPrice1 = b1; // or ob1.bids[0].price
+    // Attempt leg1
+    double topPrice1 = b1;
     if (!doLeg(tx, tri.path[0], topPrice1)) {
         std::cout << "[SIM] Leg1 fail, rollback\n";
         wallet_->rollbackTransaction(tx);
         return false;
     }
-    // leg2
+
+    // Attempt leg2
     double topPrice2 = b2;
     if (!doLeg(tx, tri.path[1], topPrice2)) {
         std::cout << "[SIM] Leg2 fail, rollback\n";
         wallet_->rollbackTransaction(tx);
         return false;
     }
-    // leg3
+
+    // Attempt leg3
     double topPrice3 = b3;
     if (!doLeg(tx, tri.path[2], topPrice3)) {
         std::cout << "[SIM] Leg3 fail, rollback\n";
@@ -100,7 +101,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         return false;
     }
 
-    // 4) commit
+    // 4) commit (all legs succeeded)
     wallet_->commitTransaction(tx);
 
     // measure newVal
@@ -124,7 +125,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     logTrade(ps.str(), oldValUSDT, newValUSDT, profitPercent);
 
     // update counters for TUI
-    if (absoluteProfit > -1e-14) { // i.e., if it's not nonsensical
+    if (absoluteProfit > -1e-14) {
         ++totalTrades_;
         cumulativeProfit_ += absoluteProfit;
     }
@@ -137,6 +138,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
 }
 
 // doLeg => place an order, check fill ratio, slippage, apply wallet changes
+// now with simple RETRY logic (up to 3 attempts)
 bool Simulator::doLeg(WalletTransaction& tx,
                       const std::string& pairName,
                       double topOfBookPrice)
@@ -146,32 +148,34 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return false;
     }
 
+    // Identify base & quote, plus side
     std::string baseAsset, quoteAsset, sideStr;
     double freeAmt = 0.0;
 
     if (pairName == "BTCUSDT") {
         baseAsset  = "BTC";
         quoteAsset = "USDT";
-        sideStr = "SELL";
-        freeAmt = wallet_->getFreeBalance(baseAsset);
+        sideStr    = "SELL";
+        freeAmt    = wallet_->getFreeBalance(baseAsset);
     }
     else if (pairName == "ETHUSDT") {
         baseAsset  = "ETH";
         quoteAsset = "USDT";
-        sideStr = "BUY";
-        freeAmt = wallet_->getFreeBalance(quoteAsset);
+        sideStr    = "BUY";
+        freeAmt    = wallet_->getFreeBalance(quoteAsset);
     }
     else if (pairName == "ETHBTC") {
         baseAsset  = "ETH";
         quoteAsset = "BTC";
-        sideStr = "SELL";
-        freeAmt = wallet_->getFreeBalance(baseAsset);
+        sideStr    = "SELL";
+        freeAmt    = wallet_->getFreeBalance(baseAsset);
     }
     else {
         std::cout << "[SIM] Unknown pair " << pairName << "\n";
         return false;
     }
 
+    // Decide how much we want to do
     double desiredQtyBase = 0.0;
     if (sideStr == "SELL") {
         desiredQtyBase = std::min(freeAmt, volumeLimit_);
@@ -189,56 +193,105 @@ bool Simulator::doLeg(WalletTransaction& tx,
         }
     }
 
-    // Set mock price for dry executor
-    auto* dryExec = dynamic_cast<BinanceDryExecutor*>(executor_);
-    if (dryExec) {
+    // If it's a dry executor, we sync mock price
+    if (auto* dryExec = dynamic_cast<BinanceDryExecutor*>(executor_)) {
         dryExec->setMockPrice(topOfBookPrice);
     }
 
-    auto t0 = std::chrono::high_resolution_clock::now();
-    OrderSide sideEnum = (sideStr == "SELL") ? OrderSide::SELL : OrderSide::BUY;
-    OrderResult res = executor_->placeMarketOrder(pairName, sideEnum, desiredQtyBase);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    // Retry logic
+    const int MAX_RETRIES = 3;
+    for (int attempt = 1; attempt <= MAX_RETRIES; ++attempt)
+    {
+        auto t0 = std::chrono::high_resolution_clock::now();
 
-    if (!res.success || res.filledQuantity <= 0.0) {
-        std::cout << "[SIM] " << sideStr << " fail or no fill\n";
-        return false;
+        OrderSide sideEnum = (sideStr == "SELL") ? OrderSide::SELL : OrderSide::BUY;
+        OrderResult res = executor_->placeMarketOrder(pairName, sideEnum, desiredQtyBase);
+
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        // 1) Did the order fail entirely?
+        if (!res.success || res.filledQuantity <= 0.0) {
+            std::cout << "[SIM] Attempt=" << attempt << " " << sideStr
+                      << " fail or no fill. filledQty=" << res.filledQuantity << "\n";
+
+            if (attempt < MAX_RETRIES) {
+                std::cout << "[SIM] Retrying in 500ms...\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            // no more retries
+            return false;
+        }
+
+        // 2) Check fill ratio
+        double fillRatio = res.filledQuantity / desiredQtyBase;
+        if (fillRatio < minFillRatio_) {
+            std::cout << "[SIM] Attempt=" << attempt
+                      << " fill ratio < " << minFillRatio_
+                      << " => " << fillRatio << "\n";
+
+            if (attempt < MAX_RETRIES) {
+                std::cout << "[SIM] Retrying in 500ms...\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            // no more retries
+            return false;
+        }
+
+        // 3) Check slippage
+        double slip = std::fabs(res.avgPrice - topOfBookPrice) / topOfBookPrice;
+        if (slip > slippageTolerance_) {
+            std::cout << "[SIM] Attempt=" << attempt
+                      << " slippage " << slip
+                      << " > tol=" << slippageTolerance_ << "\n";
+
+            if (attempt < MAX_RETRIES) {
+                std::cout << "[SIM] Retrying in 500ms...\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            // no more retries
+            return false;
+        }
+
+        // If we get here => the order is good enough; apply wallet changes
+        double netProceedsOrCost = res.costOrProceeds;
+        if (sideStr == "SELL") {
+            double netProceeds = netProceedsOrCost * (1.0 - feePercent_);
+            bool ok1 = wallet_->applyChange(tx, baseAsset, -(res.filledQuantity), 0.0);
+            bool ok2 = wallet_->applyChange(tx, quoteAsset, netProceeds, 0.0);
+            if (!ok1 || !ok2) {
+                std::cout << "[SIM] wallet applyChange fail.\n";
+                return false;
+            }
+        } else {
+            double netCost = netProceedsOrCost * (1.0 + feePercent_);
+            bool ok1 = wallet_->applyChange(tx, quoteAsset, -netCost, 0.0);
+            bool ok2 = wallet_->applyChange(tx, baseAsset, res.filledQuantity, 0.0);
+            if (!ok1 || !ok2) {
+                std::cout << "[SIM] wallet applyChange fail.\n";
+                return false;
+            }
+        }
+
+        // successful final attempt -> print and log
+        std::cout << "[SIM] Attempt=" << attempt
+                  << " " << sideStr << " " << res.filledQuantity
+                  << " base on " << pairName
+                  << " cost/proceeds=" << res.costOrProceeds
+                  << " time=" << ms << " ms\n";
+
+        logLeg(pairName, sideStr, desiredQtyBase, res.filledQuantity,
+               fillRatio, slip, ms);
+
+        // done
+        return true;
     }
 
-    double fillRatio = res.filledQuantity / desiredQtyBase;
-    if (fillRatio < minFillRatio_) {
-        std::cout << "[SIM] fill ratio < " << minFillRatio_ << "\n";
-        return false;
-    }
-
-    double slip = std::fabs(res.avgPrice - topOfBookPrice) / topOfBookPrice;
-    if (slip > slippageTolerance_) {
-        std::cout << "[SIM] slippage " << slip << " > tol\n";
-        return false;
-    }
-
-    // Apply wallet changes based on trade
-    if (sideStr == "SELL") {
-        double netProceeds = res.costOrProceeds * (1.0 - feePercent_);
-        bool ok1 = wallet_->applyChange(tx, baseAsset, -(res.filledQuantity), 0.0);
-        bool ok2 = wallet_->applyChange(tx, quoteAsset, netProceeds, 0.0);
-        if (!ok1 || !ok2) return false;
-    } else {
-        double netCost = res.costOrProceeds * (1.0 + feePercent_);
-        bool ok1 = wallet_->applyChange(tx, quoteAsset, -netCost, 0.0);
-        bool ok2 = wallet_->applyChange(tx, baseAsset, res.filledQuantity, 0.0);
-        if (!ok1 || !ok2) return false;
-    }
-
-    std::cout << "[SIM] " << sideStr << " " << res.filledQuantity
-              << " base on " << pairName
-              << " cost/proceeds=" << res.costOrProceeds
-              << " time=" << ms << " ms\n";
-
-    logLeg(pairName, sideStr, desiredQtyBase, res.filledQuantity,
-           fillRatio, slip, ms);
-    return true;
+    // if we exit the for loop, all attempts failed
+    return false;
 }
 
 std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName) const {
@@ -253,7 +306,6 @@ std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName
         assets.push_back("ETH");
         assets.push_back("BTC");
     }
-    // add more if you have them
     return assets;
 }
 
@@ -301,7 +353,6 @@ void Simulator::logLeg(const std::string& pairName,
 {
     static const char* LEG_LOG_FILE = "leg_log.csv";
     static bool headerWritten = false;
-    // To avoid concurrency issues around header writing, use a static mutex:
     static std::mutex logMutex;
     std::lock_guard<std::mutex> lg(logMutex);
 
