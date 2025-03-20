@@ -5,6 +5,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "core/triangle.hpp"
 #include "core/orderbook.hpp"
@@ -16,6 +17,8 @@
  *  - pointer to your atomic Wallet
  *  - pointer to an IExchangeExecutor (dry or real)
  *  - a global map of asset locks to avoid concurrency issues across triangles
+ *
+ * Now also tracks total trades and cumulative profit for the TUI.
  */
 class Simulator {
 public:
@@ -41,6 +44,10 @@ public:
 
     void printWallet() const;
 
+    // For TUI:
+    int getTotalTrades() const;
+    double getCumulativeProfit() const;
+
 private:
     // Logging for entire 3-leg trade
     void logTrade(const std::string& path,
@@ -49,7 +56,7 @@ private:
                   double profitPercent);
 
     // Helper for each leg (BTCUSDT, etc.)
-    bool doLeg(WalletTransaction& tx, 
+    bool doLeg(WalletTransaction& tx,
                const std::string& pairName,
                double topOfBookPrice);
 
@@ -78,6 +85,10 @@ private:
     // Global locks: asset -> mutex
     // so if we trade BTCUSDT, we lock "BTC" and "USDT" for the trade's duration
     static std::map<std::string, std::mutex> assetLocks_;
+
+    // For tracking in the TUI:
+    int totalTrades_{0};
+    double cumulativeProfit_{0.0};
 };
 
 #endif // SIMULATOR_HPP

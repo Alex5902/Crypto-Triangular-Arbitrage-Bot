@@ -28,6 +28,14 @@ static nlohmann::json loadConfig(const std::string& path) {
     return j;
 }
 
+// Simple TUI function: prints a “dashboard” with trades so far
+static void printDashboard(const Simulator& sim) {
+    std::cout << "\n======== DASHBOARD ========\n";
+    std::cout << " Total trades so far:   " << sim.getTotalTrades() << "\n";
+    std::cout << " Cumulative profit (USDT est): " << sim.getCumulativeProfit() << "\n";
+    std::cout << "==========================\n";
+}
+
 int main() {
     // 1) Load config
     nlohmann::json cfg = loadConfig("config/bot_config.json");
@@ -84,9 +92,18 @@ int main() {
     std::cout << "Bot running. Press Ctrl+C to quit.\n";
 
     // 7) main loop
-    while(true) {
+    //    We'll just sleep and display a small TUI (wallet + trades) every 30s.
+    while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(30));
+        // Print wallet balances
         wallet.printAll();
+        // Print TUI stats
+        printDashboard(sim);
+
+        // Optionally, we could do an all-symbol scan from here:
+        // scanner.scanAllSymbolsConcurrently();
+        // but if you rely on the OrderBookManager to trigger scans individually,
+        // you can leave this out.
     }
 
     return 0;

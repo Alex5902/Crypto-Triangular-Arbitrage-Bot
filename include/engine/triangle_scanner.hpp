@@ -5,12 +5,20 @@
 #include <string>
 #include <unordered_map>
 #include <future>
+#include <mutex>
+
 #include "core/thread_pool.hpp"
-#include "core/triangle.hpp"  // so we have struct Triangle
+#include "core/triangle.hpp"  // struct Triangle
+
 // forward-declare
 class OrderBookManager;
 class Simulator;
 
+/**
+ * Now includes:
+ *  1) Additional concurrency method scanAllSymbolsConcurrently(...)
+ *  2) A function to log scanning to CSV (scan_log.csv)
+ */
 class TriangleScanner {
 public:
     TriangleScanner();
@@ -25,6 +33,16 @@ public:
     void setMinProfitThreshold(double thresh) { minProfitThreshold_ = thresh; }
     void setSimulator(Simulator* sim) { simulator_ = sim; }
 
+    // Additional concurrency method
+    void scanAllSymbolsConcurrently();
+
+private:
+    // CSV logger for scanning
+    void logScanResult(const std::string& symbol,
+                       int triCount,
+                       double bestProfit,
+                       double latencyMs);
+
 private:
     OrderBookManager* obm_{nullptr};
 
@@ -35,6 +53,10 @@ private:
     ThreadPool pool_{4};
 
     Simulator* simulator_{nullptr};
+
+    // For concurrency around writing to scan_log.csv
+    std::mutex scanLogMutex_;
+    bool scanLogHeaderWritten_{false};
 };
 
 #endif // TRIANGLE_SCANNER_HPP

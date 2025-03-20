@@ -5,26 +5,30 @@
 
 /**
  * A dry-run Binance executor that simulates real orders.
- *  - baseLatencyMs: the baseline “network + matching engine” latency
  *  - fillRatio: fraction of quantity that actually fills
- *  - mockPrice: the fill price used for cost/proceeds
+ *  - baseLatencyMs: “network + engine” latency
+ *  - mockPrice: baseline fill price
+ *  - slippageBps: basis points of slippage per 1% of the order 
  */
 class BinanceDryExecutor : public IExchangeExecutor {
 public:
     BinanceDryExecutor(double fillRatio=1.0,
                        int baseLatencyMs=150,
-                       double mockPrice=28000.0);
+                       double mockPrice=28000.0,
+                       double slippageBps=50.0);
 
     OrderResult placeMarketOrder(const std::string& symbol,
                                  OrderSide side,
                                  double quantityBase) override;
 
     void setMockPrice(double px);
+    void setSlippageBps(double bps) { slippageBps_ = bps; }
 
 private:
     double fillRatio_;
     int baseLatencyMs_;
     double mockPrice_;
+    double slippageBps_;  // e.g. 50.0 = 0.50% slippage per some volume metric
 };
 
 #endif // BINANCE_DRY_EXECUTOR_HPP

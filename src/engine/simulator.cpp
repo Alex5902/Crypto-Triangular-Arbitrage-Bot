@@ -1,4 +1,5 @@
 #include "engine/simulator.hpp"
+#include "exchange/binance_dry_executor.hpp"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -24,17 +25,18 @@ Simulator::Simulator(const std::string& logFileName,
   , wallet_(sharedWallet)
   , executor_(executor)
 {
+    // Initialize locks if empty
     if (assetLocks_.empty()) {
-        if (assetLocks_.empty()) {
-            assetLocks_.try_emplace("BTC");
-            assetLocks_.try_emplace("ETH");
-            assetLocks_.try_emplace("USDT");
-        }        
+        assetLocks_.try_emplace("BTC");
+        assetLocks_.try_emplace("ETH");
+        assetLocks_.try_emplace("USDT");
     }
-    
-    // optionally start fresh log
+
+    // Optionally start fresh log (for the summary of 3-leg trades)
     std::ofstream file(logFileName_, std::ios::app);
     if (file.is_open()) {
+        // If you want to ensure only one header ever:
+        // You can track a static bool, but be careful about multiple runs.
         file << "timestamp,path,start_val,end_val,profit_percent\n";
     }
 }
@@ -45,10 +47,10 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob2,
                                              const OrderBookData& ob3)
 {
-    // 1) figure out oldVal in USDT
-    double b1 = (ob1.bids.empty()?0.0 : ob1.bids[0].price);
-    double b2 = (ob2.bids.empty()?0.0 : ob2.bids[0].price);
-    double b3 = (ob3.bids.empty()?0.0 : ob3.bids[0].price);
+    // 1) figure out oldVal in USDT (roughly)
+    double b1 = (ob1.bids.empty() ? 0.0 : ob1.bids[0].price);
+    double b2 = (ob2.bids.empty() ? 0.0 : ob2.bids[0].price);
+    double b3 = (ob3.bids.empty() ? 0.0 : ob3.bids[0].price);
 
     double oldValUSDT =
         wallet_->getFreeBalance("BTC") * b1 +
@@ -56,8 +58,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         wallet_->getFreeBalance("USDT");
 
     // 2) Lock all assets used by tri.path for the entire 3-leg trade
-    // e.g. if tri.path = [BTCUSDT, ETHUSDT, ETHBTC], we'll lock {BTC,USDT,ETH}
-    // We'll do a small vector of locks
     std::vector<std::string> allAssets;
     for (auto& p : tri.path) {
         auto pairAssets = getAssetsForPair(p);
@@ -110,17 +110,24 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         wallet_->getFreeBalance("USDT");
 
     double profitPercent = 0.0;
+    double absoluteProfit = (newValUSDT - oldValUSDT);
     if (oldValUSDT > 0.0) {
-        profitPercent = ((newValUSDT - oldValUSDT)/ oldValUSDT)*100.0;
+        profitPercent = (absoluteProfit / oldValUSDT) * 100.0;
     }
 
-    // build path
+    // build path for logging
     std::stringstream ps;
-    for (size_t i=0; i < tri.path.size(); i++) {
-        if (i>0) ps << "->";
+    for (size_t i = 0; i < tri.path.size(); i++) {
+        if (i > 0) ps << "->";
         ps << tri.path[i];
     }
     logTrade(ps.str(), oldValUSDT, newValUSDT, profitPercent);
+
+    // update counters for TUI
+    if (absoluteProfit > -1e-14) { // i.e., if it's not nonsensical
+        ++totalTrades_;
+        cumulativeProfit_ += absoluteProfit;
+    }
 
     std::cout << "[SIM] Traded triangle: " << ps.str()
               << " oldVal=" << oldValUSDT
@@ -139,52 +146,60 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return false;
     }
 
-    // Decide side
-    // e.g. if "BTCUSDT", we SELL BTC
-    // if "ETHUSDT", we BUY ETH
-    // We'll do 2 examples:
+    std::string baseAsset, quoteAsset, sideStr;
+    double freeAmt = 0.0;
 
-    std::string sideStr;
-    double freeAmt=0.0; // how much we can attempt
     if (pairName == "BTCUSDT") {
+        baseAsset  = "BTC";
+        quoteAsset = "USDT";
         sideStr = "SELL";
-        freeAmt = wallet_->getFreeBalance("BTC");
+        freeAmt = wallet_->getFreeBalance(baseAsset);
     }
     else if (pairName == "ETHUSDT") {
+        baseAsset  = "ETH";
+        quoteAsset = "USDT";
         sideStr = "BUY";
-        freeAmt = wallet_->getFreeBalance("USDT");
+        freeAmt = wallet_->getFreeBalance(quoteAsset);
+    }
+    else if (pairName == "ETHBTC") {
+        baseAsset  = "ETH";
+        quoteAsset = "BTC";
+        sideStr = "SELL";
+        freeAmt = wallet_->getFreeBalance(baseAsset);
     }
     else {
         std::cout << "[SIM] Unknown pair " << pairName << "\n";
         return false;
     }
 
-    // figure how much we want to do
-    double desiredQtyBase = 0.0; // quantity in base if SELL, or if BUY
+    double desiredQtyBase = 0.0;
     if (sideStr == "SELL") {
         desiredQtyBase = std::min(freeAmt, volumeLimit_);
         if (desiredQtyBase <= 0.0) {
-            std::cout << "[SIM] No " << "BTC" << " to sell.\n";
+            std::cout << "[SIM] No " << baseAsset << " to sell.\n";
             return false;
         }
     } else {
-        // side=BUY => we have free USDT in freeAmt
-        // how many base can we buy if we spend min(freeAmt, volumeLimit_ * topOfBookPrice)?
-        double maxSpend = volumeLimit_ * topOfBookPrice; 
+        double maxSpend = volumeLimit_ * topOfBookPrice;
         double spend = std::min(freeAmt, maxSpend);
         desiredQtyBase = spend / topOfBookPrice;
         if (desiredQtyBase <= 0.0) {
-            std::cout << "[SIM] Not enough USDT.\n";
+            std::cout << "[SIM] Not enough " << quoteAsset << ".\n";
             return false;
         }
     }
 
-    // measure latency
+    // Set mock price for dry executor
+    auto* dryExec = dynamic_cast<BinanceDryExecutor*>(executor_);
+    if (dryExec) {
+        dryExec->setMockPrice(topOfBookPrice);
+    }
+
     auto t0 = std::chrono::high_resolution_clock::now();
-    OrderSide sideEnum = (sideStr=="SELL") ? OrderSide::SELL : OrderSide::BUY;
+    OrderSide sideEnum = (sideStr == "SELL") ? OrderSide::SELL : OrderSide::BUY;
     OrderResult res = executor_->placeMarketOrder(pairName, sideEnum, desiredQtyBase);
     auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     if (!res.success || res.filledQuantity <= 0.0) {
         std::cout << "[SIM] " << sideStr << " fail or no fill\n";
@@ -196,42 +211,36 @@ bool Simulator::doLeg(WalletTransaction& tx,
         std::cout << "[SIM] fill ratio < " << minFillRatio_ << "\n";
         return false;
     }
-    double slip = std::fabs(res.avgPrice - topOfBookPrice)/topOfBookPrice;
+
+    double slip = std::fabs(res.avgPrice - topOfBookPrice) / topOfBookPrice;
     if (slip > slippageTolerance_) {
         std::cout << "[SIM] slippage " << slip << " > tol\n";
         return false;
     }
 
-    // apply fees
-    // if SELL => net proceeds
-    // if BUY => cost is res.filledQuantity * res.avgPrice
-    if (sideStr=="SELL") {
-        double netProceeds = res.costOrProceeds*(1.0 - feePercent_);
-        // remove BTC, add USDT
-        bool ok1 = wallet_->applyChange(tx, "BTC", -(res.filledQuantity), 0.0);
-        bool ok2 = wallet_->applyChange(tx, "USDT", netProceeds, 0.0);
-        if(!ok1 || !ok2) return false;
+    // Apply wallet changes based on trade
+    if (sideStr == "SELL") {
+        double netProceeds = res.costOrProceeds * (1.0 - feePercent_);
+        bool ok1 = wallet_->applyChange(tx, baseAsset, -(res.filledQuantity), 0.0);
+        bool ok2 = wallet_->applyChange(tx, quoteAsset, netProceeds, 0.0);
+        if (!ok1 || !ok2) return false;
     } else {
-        // BUY => we spent costOrProceeds
-        double netCost = res.costOrProceeds*(1.0 + feePercent_);
-        bool ok1 = wallet_->applyChange(tx, "USDT", -netCost, 0.0);
-        bool ok2 = wallet_->applyChange(tx, "ETH", res.filledQuantity, 0.0);
-        if(!ok1 || !ok2) return false;
+        double netCost = res.costOrProceeds * (1.0 + feePercent_);
+        bool ok1 = wallet_->applyChange(tx, quoteAsset, -netCost, 0.0);
+        bool ok2 = wallet_->applyChange(tx, baseAsset, res.filledQuantity, 0.0);
+        if (!ok1 || !ok2) return false;
     }
 
-    // Print a quick summary
     std::cout << "[SIM] " << sideStr << " " << res.filledQuantity
               << " base on " << pairName
               << " cost/proceeds=" << res.costOrProceeds
               << " time=" << ms << " ms\n";
 
-    // log the leg
     logLeg(pairName, sideStr, desiredQtyBase, res.filledQuantity,
            fillRatio, slip, ms);
     return true;
 }
 
-// We use a simple approach: "BTCUSDT" => assets {BTC,USDT}, "ETHUSDT" => {ETH,USDT}, etc.
 std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName) const {
     std::vector<std::string> assets;
     if (pairName == "BTCUSDT") {
@@ -244,7 +253,7 @@ std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName
         assets.push_back("ETH");
         assets.push_back("BTC");
     }
-    // add more if you have "BNBUSDT", etc.
+    // add more if you have them
     return assets;
 }
 
@@ -254,6 +263,7 @@ double Simulator::simulateTrade(const Triangle& /*tri*/,
                                 double /*bid2*/, double /*ask2*/,
                                 double /*bid3*/, double /*ask3*/)
 {
+    // Original stub
     return 0.0;
 }
 
@@ -289,9 +299,11 @@ void Simulator::logLeg(const std::string& pairName,
                        double slipPct,
                        double latencyMs)
 {
-    // We'll write to an extra CSV file for leg-level detail
     static const char* LEG_LOG_FILE = "leg_log.csv";
     static bool headerWritten = false;
+    // To avoid concurrency issues around header writing, use a static mutex:
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lg(logMutex);
 
     std::ofstream f(LEG_LOG_FILE, std::ios::app);
     if (f.is_open()) {
@@ -311,4 +323,13 @@ void Simulator::logLeg(const std::string& pairName,
           << slipPct << ","
           << latencyMs << "\n";
     }
+}
+
+// For TUI
+int Simulator::getTotalTrades() const {
+    return totalTrades_;
+}
+
+double Simulator::getCumulativeProfit() const {
+    return cumulativeProfit_;
 }

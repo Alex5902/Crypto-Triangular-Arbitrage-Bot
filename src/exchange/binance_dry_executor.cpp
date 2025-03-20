@@ -1,59 +1,62 @@
 #include "exchange/binance_dry_executor.hpp"
-#include <random>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 
 BinanceDryExecutor::BinanceDryExecutor(double fillRatio,
                                        int baseLatencyMs,
-                                       double mockPrice)
-    : fillRatio_(fillRatio)
-    , baseLatencyMs_(baseLatencyMs)
-    , mockPrice_(mockPrice)
+                                       double mockPrice,
+                                       double slippageBps)
+  : fillRatio_(fillRatio)
+  , baseLatencyMs_(baseLatencyMs)
+  , mockPrice_(mockPrice)
+  , slippageBps_(slippageBps)
 {}
-
-void BinanceDryExecutor::setMockPrice(double px) {
-    mockPrice_ = px;
-}
 
 OrderResult BinanceDryExecutor::placeMarketOrder(const std::string& symbol,
                                                  OrderSide side,
                                                  double quantityBase)
 {
-    // measure start time
-    auto t0 = std::chrono::high_resolution_clock::now();
+    // Simulate latency
+    std::this_thread::sleep_for(std::chrono::milliseconds(baseLatencyMs_));
 
-    // Simulate network latency
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<> dist(0, baseLatencyMs_);
-    int randomExtra = dist(rng); 
-    int totalMs = baseLatencyMs_ + randomExtra;
-    std::this_thread::sleep_for(std::chrono::milliseconds(totalMs));
+    OrderResult res;
+    res.success = true;
 
-    // Build result
-    OrderResult result;
-    result.success = true;
-    result.filledQuantity = quantityBase * fillRatio_;
-    result.avgPrice = mockPrice_;
+    // The fill quantity
+    res.filledQuantity = quantityBase * fillRatio_;
 
-    if (side == OrderSide::BUY) {
-        result.costOrProceeds = result.filledQuantity * result.avgPrice;
-    } else {
-        result.costOrProceeds = result.filledQuantity * result.avgPrice; 
-    }
-    result.message = "[DRY] " + symbol + " " + 
-                     (side==OrderSide::BUY?"BUY ":"SELL ") +
-                     std::to_string(result.filledQuantity) +
-                     " @ " + std::to_string(result.avgPrice);
+    // Now do a simple slippage calc based on side + quantity
+    // Example: if we want to buy a big chunk, we pay more than mockPrice
+    // slippageBps_ is arbitrary. We can do: newPrice = mockPrice_ * (1 + slipRatio)
+    // slipRatio might scale with quantity, etc.
+    double slipRatio = 0.0;
+    // Example function: slip = 0.01% per 1 base unit
+    // or you can do bigger or smaller:
+    slipRatio = (quantityBase * slippageBps_) / 10000.0; // bps means /10000
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+    double sideFactor = (side == OrderSide::BUY ? +1.0 : -1.0);
+    double adjustedPrice = mockPrice_ * (1.0 + sideFactor * slipRatio);
 
-    std::cout << "[DRY] placeMarketOrder symbol=" << symbol
-              << " side=" << (side==OrderSide::BUY?"BUY":"SELL")
-              << " qty=" << quantityBase << " => fill=" << result.filledQuantity
-              << " costOrProceeds=" << result.costOrProceeds
-              << " time=" << ms << " ms\n";
+    res.avgPrice = adjustedPrice;
 
-    return result;
+    // cost or proceeds
+    res.costOrProceeds = res.filledQuantity * res.avgPrice;
+
+    // Debug
+    std::cout << "[DRY] side=" << (side==OrderSide::BUY?"BUY":"SELL")
+              << " quantityBase=" << quantityBase
+              << " fillRatio=" << fillRatio_
+              << " finalQty=" << res.filledQuantity
+              << " slipRatio=" << slipRatio
+              << " basePrice=" << mockPrice_
+              << " adjustedPrice=" << adjustedPrice
+              << std::endl;
+
+    return res;
+}
+
+void BinanceDryExecutor::setMockPrice(double px) {
+    mockPrice_ = px;
 }
