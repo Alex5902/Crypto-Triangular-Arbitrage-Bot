@@ -7,7 +7,29 @@
 #include <ctime>
 #include <cmath>
 #include <thread>
+#include <algorithm>
 
+// We'll define parseSymbol here
+static std::vector<std::string> knownQuotes = {
+    "USDT", "BTC", "ETH", "BNB", "BUSD", "USDC"
+};
+
+std::pair<std::string,std::string> parseSymbol(const std::string& pair) {
+    for (const auto& q : knownQuotes) {
+        if (pair.size() > q.size()) {
+            size_t pos = pair.rfind(q);
+            if (pos != std::string::npos && (pos + q.size()) == pair.size()) {
+                // q is suffix
+                std::string base = pair.substr(0, pos);
+                return { base, q };
+            }
+        }
+    }
+    // fallback
+    return { pair, "UNKNOWN" };
+}
+
+// static map
 std::map<std::string, std::mutex> Simulator::assetLocks_;
 
 Simulator::Simulator(const std::string& logFileName,
@@ -23,15 +45,17 @@ Simulator::Simulator(const std::string& logFileName,
   , volumeLimit_(volumeLimit)
   , minFillRatio_(minFillRatio)
   , wallet_(sharedWallet)
-  , executor_(executor) // we won't use it for depth simulation, but it's here if you expand
+  , executor_(executor)
 {
     if (assetLocks_.empty()) {
         assetLocks_.try_emplace("BTC");
         assetLocks_.try_emplace("ETH");
         assetLocks_.try_emplace("USDT");
+        assetLocks_.try_emplace("BNB");
+        assetLocks_.try_emplace("BUSD");
+        assetLocks_.try_emplace("USDC");
     }
 
-    // Start or append sim log
     std::ofstream file(logFileName_, std::ios::app);
     if (file.is_open()) {
         file << "timestamp,path,start_val,end_val,profit_percent\n";
@@ -43,17 +67,16 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob2,
                                              const OrderBookData& ob3)
 {
-    // 1) oldVal
+    // same as before
     double b1 = (ob1.bids.empty() ? 0.0 : ob1.bids[0].price);
     double b2 = (ob2.bids.empty() ? 0.0 : ob2.bids[0].price);
     double b3 = (ob3.bids.empty() ? 0.0 : ob3.bids[0].price);
 
-    double oldValUSDT =
-        wallet_->getFreeBalance("BTC") * b1 +
-        wallet_->getFreeBalance("ETH") * b2 +
-        wallet_->getFreeBalance("USDT");
+    double oldValUSDT = wallet_->getFreeBalance("BTC") * b1
+                      + wallet_->getFreeBalance("ETH") * b2
+                      + wallet_->getFreeBalance("USDT");
 
-    // 2) Lock assets used
+    // lock assets
     std::vector<std::string> allAssets;
     for (auto& p : tri.path) {
         auto pairAssets = getAssetsForPair(p);
@@ -93,19 +116,16 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
 
     wallet_->commitTransaction(tx);
 
-    // newVal
-    double newValUSDT =
-        wallet_->getFreeBalance("BTC") * b3 +
-        wallet_->getFreeBalance("ETH") * b2 +
-        wallet_->getFreeBalance("USDT");
-
+    double newValUSDT = wallet_->getFreeBalance("BTC") * b3
+                      + wallet_->getFreeBalance("ETH") * b2
+                      + wallet_->getFreeBalance("USDT");
     double profitPercent = 0.0;
     double absoluteProfit = (newValUSDT - oldValUSDT);
     if (oldValUSDT > 0.0) {
         profitPercent = (absoluteProfit / oldValUSDT) * 100.0;
     }
 
-    // build path string
+    // log
     std::stringstream ps;
     for (size_t i = 0; i < tri.path.size(); i++) {
         if (i > 0) ps << "->";
@@ -125,94 +145,82 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     return true;
 }
 
-/**
- * The new doLeg:
- *  - Figures out side (SELL or BUY).
- *  - If SELL: fill from ob.bids; if BUY: fill from ob.asks
- *  - Loops over levels until we fill the desired base quantity or run out of depth
- *  - Averages the fill price
- *  - Checks fill ratio & slippage
- *  - Applies changes to wallet
- */
+
 bool Simulator::doLeg(WalletTransaction& tx,
                       const std::string& pairName,
                       const OrderBookData& ob)
 {
-    // measure start time for latency
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    // side, baseAsset, quoteAsset
-    std::string sideStr;
-    std::string baseAsset, quoteAsset;
-    double freeAmt = 0.0;
-
-    if (pairName == "BTCUSDT") {
-        sideStr = "SELL";
-        baseAsset  = "BTC";
-        quoteAsset = "USDT";
-        freeAmt = wallet_->getFreeBalance(baseAsset);
-    }
-    else if (pairName == "ETHUSDT") {
-        sideStr = "BUY";
-        baseAsset  = "ETH";
-        quoteAsset = "USDT";
-        freeAmt = wallet_->getFreeBalance(quoteAsset);
-    }
-    else if (pairName == "ETHBTC") {
-        sideStr = "SELL";
-        baseAsset  = "ETH";
-        quoteAsset = "BTC";
-        freeAmt = wallet_->getFreeBalance(baseAsset);
-    }
-    else {
-        std::cout << "[SIM] Unknown pair " << pairName << "\n";
+    // Dynamically parse base/quote
+    auto [baseAsset, quoteAsset] = parseSymbol(pairName);
+    if (quoteAsset == "UNKNOWN") {
+        std::cout << "[SIM] parseSymbol => unknown quote for pair=" 
+                  << pairName << "\n";
         return false;
     }
 
-    // how much do we want to trade in "base" units?
+    // Decide side (BUY or SELL) with a simple default approach:
+    // If quote is USDT or BTC => we SELL the base
+    // else => we BUY the base using the quote
+    bool isSell = false;
+    if (quoteAsset == "USDT" || quoteAsset == "BTC") {
+        isSell = true;
+    }
+
+    std::string sideStr = (isSell ? "SELL" : "BUY");
+
+    double freeAmt = 0.0;
+    if (isSell) {
+        // we have base asset, want to sell
+        freeAmt = wallet_->getFreeBalance(baseAsset);
+    } else {
+        // we want to buy base asset => we have quote
+        freeAmt = wallet_->getFreeBalance(quoteAsset);
+    }
+
+    // Figure out how much we want to do
     double desiredQtyBase = 0.0;
-    if (sideStr == "SELL") {
+    if (isSell) {
         desiredQtyBase = std::min(freeAmt, volumeLimit_);
         if (desiredQtyBase <= 0.0) {
             std::cout << "[SIM] Not enough " << baseAsset << " to sell.\n";
             return false;
         }
     } else {
-        // side=BUY => we have free quoteAsset
-        // how much base can we buy if we spend up to volumeLimit_ * bestAsk?
-        // but we have the entire ask depth, so let's do a top-of-book estimate just for max
-        double bestAsk = (ob.asks.empty()) ? 99999999.0 : ob.asks[0].price;
+        // If BUY => we have 'freeAmt' of quote asset
+        // We'll do a rough top-of-book to guess how much base we can buy
+        double bestAsk = (ob.asks.empty() ? 99999999.0 : ob.asks[0].price);
         double maxSpend = volumeLimit_ * bestAsk;
         double spend = std::min(freeAmt, maxSpend);
-        desiredQtyBase = spend / bestAsk;
+        desiredQtyBase = (bestAsk > 0.0 ? spend / bestAsk : 0.0);
         if (desiredQtyBase <= 0.0) {
-            std::cout << "[SIM] Not enough " << quoteAsset << ".\n";
+            std::cout << "[SIM] Not enough " << quoteAsset << " to buy " 
+                      << baseAsset << "\n";
             return false;
         }
     }
 
-    // now we fill across the relevant side of the book
+    // Now fill across the relevant side of the book
     double filledQty = 0.0;
-    double cost = 0.0; // if SELL => cost is what we receive; if BUY => cost is what we pay
-    bool isSell = (sideStr == "SELL");
-
+    double cost = 0.0; // if SELL => cost is proceeds, if BUY => cost is how much we pay
     const auto& levels = (isSell ? ob.bids : ob.asks);
     if (levels.empty()) {
-        std::cout << "[SIM] no orderbook levels\n";
+        std::cout << "[SIM] no orderbook levels for " << pairName << "\n";
         return false;
     }
 
     double remainingBase = desiredQtyBase;
     for (const auto& lvl : levels) {
-        double lvlPrice  = lvl.price;
-        double lvlQty    = lvl.quantity; // in base units
+        double lvlPrice = lvl.price;
+        double lvlQty   = lvl.quantity; // in base units
         if (lvlQty <= 0.0) continue;
 
-        double tradeQty = std::min(remainingBase, lvlQty);
-        double tradeCost = tradeQty * lvlPrice;
+        double tradeQty   = std::min(remainingBase, lvlQty);
+        double tradeCost  = tradeQty * lvlPrice;
 
-        filledQty += tradeQty;
-        cost += tradeCost;
+        filledQty  += tradeQty;
+        cost       += tradeCost;
 
         remainingBase -= tradeQty;
         if (remainingBase <= 1e-12) {
@@ -221,13 +229,11 @@ bool Simulator::doLeg(WalletTransaction& tx,
     }
 
     if (filledQty <= 1e-12) {
-        std::cout << "[SIM] no fill at all from depth\n";
+        std::cout << "[SIM] no fill at all from depth for " << pairName << "\n";
         return false;
     }
 
-    // average fill price
     double avgPrice = cost / filledQty;
-
     double fillRatio = filledQty / desiredQtyBase;
     if (fillRatio < minFillRatio_) {
         std::cout << "[SIM] fillRatio=" << fillRatio
@@ -235,14 +241,12 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return false;
     }
 
-    // check slippage against the "best price" for slippage calc
-    // if SELL => best price is ob.bids[0].price
-    // if BUY  => best price is ob.asks[0].price
+    // slippage check
     double bestPx = 0.0;
     if (isSell) {
-        bestPx = (ob.bids.empty()) ? 0.0 : ob.bids[0].price;
+        bestPx = (ob.bids.empty() ? 0.0 : ob.bids[0].price);
     } else {
-        bestPx = (ob.asks.empty()) ? 99999999.0 : ob.asks[0].price;
+        bestPx = (ob.asks.empty() ? 99999999.0 : ob.asks[0].price);
     }
     if (bestPx <= 0.0) {
         std::cout << "[SIM] bestPx=0 => empty book\n";
@@ -256,29 +260,16 @@ bool Simulator::doLeg(WalletTransaction& tx,
     }
 
     // apply fees
-    double netCostOrProceeds = cost;
-    if (isSell) {
-        // we SELL => we receive proceeds
-        // fee => subtract from proceeds
-        netCostOrProceeds = cost * (1.0 - feePercent_);
-    } else {
-        // we BUY => we pay cost
-        // fee => + cost
-        netCostOrProceeds = cost * (1.0 + feePercent_);
-    }
+    double netCostOrProceeds = (isSell ? cost * (1.0 - feePercent_)
+                                       : cost * (1.0 + feePercent_));
 
-    // apply wallet changes
+    // wallet changes
     bool ok1 = false, ok2 = false;
     if (isSell) {
-        // remove filledQty of baseAsset
         ok1 = wallet_->applyChange(tx, baseAsset, -filledQty, 0.0);
-        // add net proceeds in quote
         ok2 = wallet_->applyChange(tx, quoteAsset, netCostOrProceeds, 0.0);
     } else {
-        // we spent netCostOrProceeds from the quote
-        double spent = netCostOrProceeds;
-        ok1 = wallet_->applyChange(tx, quoteAsset, -spent, 0.0);
-        // we gained filledQty of base
+        ok1 = wallet_->applyChange(tx, quoteAsset, -netCostOrProceeds, 0.0);
         ok2 = wallet_->applyChange(tx, baseAsset, filledQty, 0.0);
     }
     if (!ok1 || !ok2) {
@@ -289,27 +280,24 @@ bool Simulator::doLeg(WalletTransaction& tx,
     auto t1 = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    // final print + log
-    std::cout << "[SIM] " << sideStr << " depth-based fill on " << pairName
+    std::cout << "[SIM] " << (isSell?"SELL":"BUY") << " dynamic on " << pairName
               << " desiredQty=" << desiredQtyBase
               << " filledQty=" << filledQty
               << " avgPrice=" << avgPrice
               << " costOrProceeds=" << cost
               << " time=" << ms << " ms\n";
 
-    logLeg(pairName, sideStr, desiredQtyBase, filledQty,
+    logLeg(pairName, (isSell?"SELL":"BUY"), desiredQtyBase, filledQty,
            fillRatio, slip, ms);
     return true;
 }
 
-// older approach
 double Simulator::simulateTrade(const Triangle& /*tri*/,
                                 double /*currentBalance*/,
                                 double /*bid1*/, double /*ask1*/,
                                 double /*bid2*/, double /*ask2*/,
                                 double /*bid3*/, double /*ask3*/)
 {
-    // stub
     return 0.0;
 }
 
@@ -376,17 +364,15 @@ double Simulator::getCumulativeProfit() const {
     return cumulativeProfit_;
 }
 
+/** 
+ * For locking assets, we just parse the pair to find (base,quote). 
+ * Then we return {base, quote} if known, else empty.
+ */
 std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName) const {
-    std::vector<std::string> assets;
-    if (pairName == "BTCUSDT") {
-        assets.push_back("BTC");
-        assets.push_back("USDT");
-    } else if (pairName == "ETHUSDT") {
-        assets.push_back("ETH");
-        assets.push_back("USDT");
-    } else if (pairName == "ETHBTC") {
-        assets.push_back("ETH");
-        assets.push_back("BTC");
+    auto [b, q] = parseSymbol(pairName);
+    if (q == "UNKNOWN") {
+        // fallback, no real lock
+        return {};
     }
-    return assets;
+    return { b, q };
 }

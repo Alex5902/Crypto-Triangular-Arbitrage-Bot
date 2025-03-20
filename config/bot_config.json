@@ -2,12 +2,15 @@
     "fee": 0.001,
     "slippage": 0.005,
     "volumeLimit": 1.0,
-    "minFill": 0.9,
-    "threshold": 0.05,
+    "minFill": 0.2,
+    "threshold": 0.0,
+    "useTestnet": true,
+    "encryptKeys": true,
     "pairsFile": "config/pairs.json",
     "walletInit": {
-        "BTC": 1,
-        "ETH": 10,
-        "USDT": 5000
+      "BTC": 0.0,
+      "ETH": 0.0,
+      "USDT": 0.0
     }
-}
+  }
+  

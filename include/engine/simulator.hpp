@@ -12,12 +12,17 @@
 #include "core/wallet.hpp"
 #include "exchange/i_exchange_executor.hpp"
 
+// We'll declare parseSymbol here so we can use it in the .cpp
+std::pair<std::string,std::string> parseSymbol(const std::string& pair);
+
 /**
  * Depth-aware simulator:
  *  - For each leg, we read the entire order book (bids or asks)
  *  - We fill as much as we can across multiple price levels
  *  - Weighted-average fill price
  *  - Then check fill ratio & slippage
+ *
+ * Now with dynamic symbol parsing for base/quote assets.
  */
 class Simulator {
 public:
@@ -34,7 +39,6 @@ public:
                                       const OrderBookData& ob2,
                                       const OrderBookData& ob3);
 
-    // older approach if you want it
     double simulateTrade(const Triangle& tri,
                          double currentBalance,
                          double bid1, double ask1,
@@ -43,7 +47,7 @@ public:
 
     void printWallet() const;
 
-    // For TUI:
+    // For TUI
     int getTotalTrades() const;
     double getCumulativeProfit() const;
 
@@ -59,7 +63,7 @@ private:
                const std::string& pairName,
                const OrderBookData& ob);
 
-    // Additional: log details about each leg
+    // log details about each leg
     void logLeg(const std::string& pairName,
                 const std::string& side,
                 double requestedQty,
@@ -68,7 +72,7 @@ private:
                 double slipPct,
                 double latencyMs);
 
-    // figure out which assets are used by "BTCUSDT" => lock "BTC"+"USDT", etc.
+    // Used only for locking assets needed by each triangle
     std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
 
 private:
@@ -79,12 +83,10 @@ private:
     double minFillRatio_;
 
     Wallet* wallet_;
-    IExchangeExecutor* executor_; // can be unused in depth simulation, but kept for structure
+    IExchangeExecutor* executor_;
 
-    // Global locks: asset -> mutex
     static std::map<std::string, std::mutex> assetLocks_;
 
-    // For TUI:
     int totalTrades_{0};
     double cumulativeProfit_{0.0};
 };
