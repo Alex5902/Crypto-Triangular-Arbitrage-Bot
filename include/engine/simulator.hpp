@@ -13,12 +13,11 @@
 #include "exchange/i_exchange_executor.hpp"
 
 /**
- * The simulator uses:
- *  - pointer to your atomic Wallet
- *  - pointer to an IExchangeExecutor (dry or real)
- *  - a global map of asset locks to avoid concurrency issues across triangles
- *
- * Now also tracks total trades and cumulative profit for the TUI.
+ * Depth-aware simulator:
+ *  - For each leg, we read the entire order book (bids or asks)
+ *  - We fill as much as we can across multiple price levels
+ *  - Weighted-average fill price
+ *  - Then check fill ratio & slippage
  */
 class Simulator {
 public:
@@ -55,10 +54,10 @@ private:
                   double endVal,
                   double profitPercent);
 
-    // Helper for each leg (BTCUSDT, etc.)
+    // Depth-aware approach for each leg
     bool doLeg(WalletTransaction& tx,
                const std::string& pairName,
-               double topOfBookPrice);
+               const OrderBookData& ob);
 
     // Additional: log details about each leg
     void logLeg(const std::string& pairName,
@@ -80,13 +79,12 @@ private:
     double minFillRatio_;
 
     Wallet* wallet_;
-    IExchangeExecutor* executor_;
+    IExchangeExecutor* executor_; // can be unused in depth simulation, but kept for structure
 
     // Global locks: asset -> mutex
-    // so if we trade BTCUSDT, we lock "BTC" and "USDT" for the trade's duration
     static std::map<std::string, std::mutex> assetLocks_;
 
-    // For tracking in the TUI:
+    // For TUI:
     int totalTrades_{0};
     double cumulativeProfit_{0.0};
 };
