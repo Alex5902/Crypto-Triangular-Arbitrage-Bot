@@ -1,43 +1,49 @@
-<<<<<<< HEAD
-build/
-*.o
-*.out
-*.log
-*.csv
-*.tmp
-config/secrets.json
-
-=======
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+# Build artifacts
+/build/
+/CMakeFiles/
+/cmake-build-*/
+CMakeCache.txt
+Makefile
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
 *.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
 *.a
-*.lib
-
-# Executables
-*.exe
 *.out
-*.app
->>>>>>> f84047c6aa4cc33cbf178feb182e27cc7dc0e263
+*.exe
+
+# Binaries
+crypto_arb_bot
+encrypt_keys
+
+# Sensitive config files
+config/keys.enc
+config/passphrase.txt
+
+# Ignore everything in config, except these files
+!config/
+config/*
+!config/pairs.json
+!config/bot_config.json
+
+# Logs and runtime dumps
+*.log
+*.csv
+*.core
+core.*
+
+# Editor/OS clutter
+*.swp
+*.DS_Store
+.vscode/
+.idea/
+*.iml
+*~
+
+# Catch all env-style config
+.env
+.env.*
+
+# Backup files
+*.bak
+*.tmp
+*.old
