@@ -3,15 +3,14 @@
 
 #include <string>
 #include "core/orderbook.hpp"  // so we know OrderBookData
-// #include "some_other_headers_if_needed"
 
 enum class OrderSide { BUY, SELL };
 
 struct OrderResult {
     bool success;            
-    double filledQuantity;   
-    double avgPrice;         
-    double costOrProceeds;   
+    double filledQuantity;   // e.g. how much base was filled
+    double avgPrice;         // average fill price
+    double costOrProceeds;   // total quote used/received
     std::string message;
 };
 
@@ -19,14 +18,14 @@ class IExchangeExecutor {
 public:
     virtual ~IExchangeExecutor() = default;
 
-    // existing method
+    // Place a market order for `quantityBase` units of base asset
     virtual OrderResult placeMarketOrder(
         const std::string& symbol,
         OrderSide side,
         double quantityBase
     ) = 0;
 
-    // NEW method:
+    // get local snapshot or fetch from an external endpoint
     virtual OrderBookData getOrderBookSnapshot(const std::string& symbol) = 0;
 };
 

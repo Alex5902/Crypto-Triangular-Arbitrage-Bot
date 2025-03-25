@@ -34,6 +34,13 @@ struct SimCandidate {
     double estimatedProfit;  // e.g. final USDT gain
 };
 
+struct ReversibleLeg {
+    bool success { false };         // Track if the leg succeeded
+    std::string symbol;             // e.g. "BTCUSDT"
+    bool sideSell;                  // true = SELL, false = BUY
+    double filledQtyBase { 0.0 };   // how much base was filled
+};
+
 /**
  * Depth-aware simulator with optional live trades.
  * 
@@ -110,8 +117,9 @@ public:
 private:
     // internal leg logic, either local or real
     bool doLeg(WalletTransaction& tx,
-               const std::string& pairName,
-               const OrderBookData& ob);
+        const std::string& pairName,
+        const OrderBookData& ob,
+        ReversibleLeg* reversalOut = nullptr);
 
     bool doLegLive(WalletTransaction& tx,
                    const std::string& pairName,
@@ -153,6 +161,8 @@ private:
 
     int totalTrades_{0};
     double cumulativeProfit_{0.0};
+
+    void reverseRealLeg(const ReversibleLeg& leg);
 
     // symbol -> filter
     std::unordered_map<std::string, SymbolFilter> symbolFilters_;
