@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #include "core/triangle.hpp"
 #include "core/orderbook.hpp"
@@ -16,10 +17,19 @@
 std::pair<std::string,std::string> parseSymbol(const std::string& pair);
 
 /**
+ * Represents the minNotional / minQty filters for a given symbol.
+ */
+struct SymbolFilter {
+    double minNotional; // e.g. 10.0
+    double minQty;      // e.g. 0.0001
+};
+
+/**
  * Depth-aware simulator with optional live trades.
  *
  * Includes:
  *   - estimateTriangleProfitUSDT(...) for full 3-leg pre-check
+ *   - enforcement of minNotional / minQty filters
  */
 class Simulator {
 public:
@@ -30,7 +40,7 @@ public:
               double minFillRatio,
               Wallet* sharedWallet,
               IExchangeExecutor* executor,
-              double minProfitUSDT);  // <-- ADDED THIS 8th parameter
+              double minProfitUSDT);  // <-- constructor
 
     // toggles real trades or simulation
     void setLiveMode(bool live) { liveMode_ = live; }
@@ -83,6 +93,14 @@ private:
 
     std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
 
+    // NEW: load filters from JSON
+    void loadSymbolFilters(const std::string& path);
+
+    // helper to check filters on a trade (local sim or live)
+    bool passesExchangeFilters(const std::string& symbol,
+                               double quantityBase,
+                               double priceEstimate);
+
 private:
     std::string logFileName_;
     double feePercent_;
@@ -95,14 +113,16 @@ private:
 
     bool liveMode_{false};
 
-    // ADD THIS to match the new constructor parameter
-    double minProfitUSDT_; //<-- We'll store the user-defined minProfit threshold
+    double minProfitUSDT_; //<-- user-defined minProfit threshold
 
     // Global locks: asset -> mutex
     static std::map<std::string, std::mutex> assetLocks_;
 
     int totalTrades_{0};
     double cumulativeProfit_{0.0};
+
+    // NEW: symbol -> filter (minNotional, minQty)
+    std::unordered_map<std::string, SymbolFilter> symbolFilters_;
 };
 
 #endif // SIMULATOR_HPP

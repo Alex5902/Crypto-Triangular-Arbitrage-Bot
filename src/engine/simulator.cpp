@@ -9,6 +9,10 @@
 #include <thread>
 #include <algorithm>
 
+// For JSON
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
 // Example known quotes. parseSymbol will detect them as suffix.
 static std::vector<std::string> knownQuotes = {
     "USDT","BTC","ETH","BNB","BUSD","USDC"
@@ -63,6 +67,77 @@ Simulator::Simulator(const std::string& logFileName,
     if (file.is_open()) {
         file << "timestamp,path,start_val,end_val,profit_percent\n";
     }
+
+    //  NEW: load symbol filters from config file
+    loadSymbolFilters("config/symbol_filters.json");
+}
+
+/**
+ * Load minNotional, minQty per symbol from JSON file.
+ */
+void Simulator::loadSymbolFilters(const std::string& path)
+{
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "[SIM] Could not open symbol filters file: " << path << "\n";
+        std::cerr << "[SIM] Orders may fail if below exchange limits.\n";
+        return;
+    }
+
+    try {
+        json j;
+        f >> j;
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            std::string sym = it.key();  // e.g. "BTCUSDT"
+            auto obj        = it.value();
+            SymbolFilter sf;
+            sf.minNotional  = obj.value("minNotional", 10.0);
+            sf.minQty       = obj.value("minQty", 0.0001);
+            symbolFilters_[sym] = sf;
+        }
+        std::cout << "[SIM] Loaded " << symbolFilters_.size()
+                  << " symbol filters from " << path << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "[SIM] Error parsing symbol_filters.json: " << e.what() << "\n";
+    }
+}
+
+/**
+ * Return true if "quantityBase * priceEstimate >= minNotional"
+ * and "quantityBase >= minQty" for the given symbol filter.
+ */
+bool Simulator::passesExchangeFilters(const std::string& symbol,
+                                      double quantityBase,
+                                      double priceEstimate)
+{
+    if (symbolFilters_.count(symbol) == 0) {
+        // no filter data => skip check or use fallback
+        // We'll do a default check: minNotional=10, minQty=0.0001
+        double notional = quantityBase * priceEstimate;
+        if (notional < 10.0 || quantityBase < 0.0001) {
+            std::cout << "[FILTER] " << symbol
+                      << ": below default minNotional=10 or minQty=0.0001\n";
+            return false;
+        }
+        return true;
+    }
+
+    auto& filt = symbolFilters_[symbol];
+    double notional = quantityBase * priceEstimate;
+
+    // Check minQty
+    if (quantityBase < filt.minQty) {
+        std::cout << "[FILTER] " << symbol << ": quantityBase="
+                  << quantityBase << " < minQty=" << filt.minQty << "\n";
+        return false;
+    }
+    // Check minNotional
+    if (notional < filt.minNotional) {
+        std::cout << "[FILTER] " << symbol << ": notional="
+                  << notional << " < minNotional=" << filt.minNotional << "\n";
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -77,13 +152,13 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob3)
 {
     // 1) Measure your starting total USDT “mark-to-market”
-    //    (We only need it to log final profit% at the end.)
     double b1 = (ob1.bids.empty() ? 0.0 : ob1.bids[0].price);
     double b2 = (ob2.bids.empty() ? 0.0 : ob2.bids[0].price);
     double b3 = (ob3.bids.empty() ? 0.0 : ob3.bids[0].price);
-    double oldValUSDT = wallet_->getFreeBalance("BTC") * b1 +
-                        wallet_->getFreeBalance("ETH") * b2 +
-                        wallet_->getFreeBalance("USDT");
+
+    double oldValUSDT = wallet_->getFreeBalance("BTC") * b1
+                      + wallet_->getFreeBalance("ETH") * b2
+                      + wallet_->getFreeBalance("USDT");
 
     // 2) Estimate final USDT if all 3 legs fill successfully
     double estProfitUSDT = estimateTriangleProfitUSDT(tri, ob1, ob2, ob3);
@@ -205,23 +280,40 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
         }
         // Decide if we are "selling base for quote" or "buying base with quote"
         bool isSell = (quoteAsset=="USDT" || quoteAsset=="BTC" || quoteAsset=="BUSD" || quoteAsset=="ETH");
-        // (You can refine this logic if your pairs differ.)
 
-        // Check how much we can spend/sell
+        // We'll pick a rough "bestPx" to estimate notional. 
+        // For a sell, bestPx = top bid; for a buy, bestPx = top ask.
+        double bestPx = 0.0;
+        if (isSell) {
+            if (!ob.bids.empty()) bestPx = ob.bids[0].price;
+        } else {
+            if (!ob.asks.empty()) bestPx = ob.asks[0].price;
+        }
+        if (bestPx <= 0.0) {
+            return false;
+        }
+
+        // (Now check how much we can spend/sell)
         double freeAmt = 0.0;
         if (isSell) {
-            // We have base
             if      (baseAsset == "BTC") freeAmt = fakeBTC;
             else if (baseAsset == "ETH") freeAmt = fakeETH;
-            else if (baseAsset == "BNB") {} // add if needed
+            else if (baseAsset == "BNB") {}
             else if (baseAsset == "BUSD") {}
             else if (baseAsset == "USDC") {}
-            // ...
             if (freeAmt <= 0.0) return false;
+
             double desiredQtyBase = std::min(freeAmt, volumeLimit_);
             if (desiredQtyBase <= 0.0) return false;
 
-            // Fill across the OB bids
+            // ***CHECK FILTERS***
+            // We'll do a quick notional guess = desiredQtyBase * bestPx
+            if (!passesExchangeFilters(pairName, desiredQtyBase, bestPx)) {
+                return false;
+            }
+
+            // Depth fill simulation ...
+            // (unchanged from your code)
             const auto& levels = ob.bids;
             if (levels.empty()) return false;
 
@@ -241,41 +333,41 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
             if (fillRatio < minFillRatio_) return false;
 
             // Slippage check
-            double bestPx = (ob.bids.empty() ? 0.0 : ob.bids[0].price);
-            if (bestPx <= 0.0) return false;
             double avgPx = cost / filledQty;
             double slip  = std::fabs(avgPx - bestPx) / bestPx;
             if (slip > slippageTolerance_) return false;
 
-            // Apply fee
+            // Fee
             double netProceeds = cost * (1.0 - feePercent_);
 
-            // Update fake wallet (sell base, gain quote)
+            // Update fake wallet
             if      (baseAsset == "BTC") fakeBTC -= filledQty;
             else if (baseAsset == "ETH") fakeETH -= filledQty;
-            // Add quote
+
             if      (quoteAsset == "USDT") fakeUSDT += netProceeds;
             else if (quoteAsset == "BTC")  fakeBTC  += netProceeds;
             else if (quoteAsset == "ETH")  fakeETH  += netProceeds;
-            // etc. for BUSD, etc.
-
-        } else {
+        }
+        else {
             // We are buying baseAsset with quoteAsset
             if      (quoteAsset == "USDT") freeAmt = fakeUSDT;
             else if (quoteAsset == "BTC")  freeAmt = fakeBTC;
             else if (quoteAsset == "ETH")  freeAmt = fakeETH;
-            // etc. for BUSD, ...
             if (freeAmt <= 0.0) return false;
 
-            double bestAsk = (ob.asks.empty() ? 999999999.0 : ob.asks[0].price);
-            double maxSpend = volumeLimit_ * bestAsk; 
+            double maxSpend = volumeLimit_ * bestPx;
             double spend = std::min(freeAmt, maxSpend);
             if (spend <= 0.0) return false;
 
-            double desiredQtyBase = (bestAsk > 0.0 ? (spend / bestAsk) : 0.0);
+            double desiredQtyBase = (bestPx > 0.0 ? spend / bestPx : 0.0);
             if (desiredQtyBase <= 1e-12) return false;
 
-            // Fill across asks
+            // ***CHECK FILTERS***
+            // We'll do a quick notional guess = desiredQtyBase * bestPx
+            if (!passesExchangeFilters(pairName, desiredQtyBase, bestPx)) {
+                return false;
+            }
+
             const auto& levels = ob.asks;
             if (levels.empty()) return false;
 
@@ -294,21 +386,18 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
             double fillRatio = filledQty / desiredQtyBase;
             if (fillRatio < minFillRatio_) return false;
 
-            // Slippage check
-            double bestPx = (ob.asks.empty()? 999999999.0 : ob.asks[0].price);
-            if (bestPx <= 0.0) return false;
             double avgPx = cost / filledQty;
             double slip  = std::fabs(avgPx - bestPx) / bestPx;
             if (slip > slippageTolerance_) return false;
 
-            // Apply fee for a buy => cost goes up
+            // Fee
             double netCost = cost * (1.0 + feePercent_);
 
-            // Update fake wallet (spend quote, gain base)
+            // Update wallet
             if      (quoteAsset == "USDT") fakeUSDT -= netCost;
             else if (quoteAsset == "BTC")  fakeBTC  -= netCost;
             else if (quoteAsset == "ETH")  fakeETH  -= netCost;
-            // Gain base
+
             if      (baseAsset == "BTC")   fakeBTC  += filledQty;
             else if (baseAsset == "ETH")   fakeETH  += filledQty;
         }
@@ -325,7 +414,6 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
                         + (fakeBTC * b3)
                         + (fakeETH * b2);
 
-    // Return net profit in USDT
     double netProfit = finalValUSDT - startValUSDT;
     return netProfit;
 }
@@ -399,6 +487,24 @@ bool Simulator::doLeg(WalletTransaction& tx,
             return false;
         }
     }
+
+    // ***CHECK FILTERS***
+    // For local sim, approximate price = top of book
+    double approximatePrice = 0.0;
+    if (isSell) {
+        if (!ob.bids.empty()) approximatePrice = ob.bids[0].price;
+    } else {
+        if (!ob.asks.empty()) approximatePrice = ob.asks[0].price;
+    }
+    if (approximatePrice <= 0.0) {
+        std::cout << "[SIM] no valid price in book to check filters.\n";
+        return false;
+    }
+
+    if (!passesExchangeFilters(pairName, desiredQtyBase, approximatePrice)) {
+        return false;
+    }
+
     double filledQty=0.0, cost=0.0;
     const auto& levels = (isSell ? ob.bids : ob.asks);
     if (levels.empty()) {
@@ -481,6 +587,26 @@ bool Simulator::doLegLive(WalletTransaction& tx,
 {
     auto t0 = std::chrono::high_resolution_clock::now();
     std::string sideStr = (isSell ? "SELL" : "BUY");
+
+    // ***CHECK FILTERS*** for live
+    // We'll guess a price from the top-of-book or just skip if empty.
+    // (In a real bot, you might fetch fresh orderbook or trust the last known.)
+    double approximatePrice = 1.0; // fallback
+    {
+        // We have the "pairName -> orderbook" if needed, but in doLegLive we only get a single "desiredQtyBase"
+        // This is a simplified approach: let's guess we can fetch the top-of-book from your aggregator or pass it in.
+        // For now, let's assume a fixed "approximate" or user can store a global map of last OB price.
+        // We'll do a minimal approach to illustrate the filter.
+        if (symbolFilters_.count(pairName)) {
+            // e.g. fallback to a rough guess, or store a "last known best price" in a global if you prefer
+            approximatePrice = 30000.0; // example fallback
+        }
+    }
+
+    if (!passesExchangeFilters(pairName, desiredQtyBase, approximatePrice)) {
+        std::cout << "[SIM-LIVE] " << pairName << " fails minQty or minNotional filter.\n";
+        return false;
+    }
 
     // 1) place real market order
     OrderSide sideEnum = (isSell ? OrderSide::SELL : OrderSide::BUY);
