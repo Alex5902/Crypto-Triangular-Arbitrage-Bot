@@ -109,11 +109,28 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
                   << bestProfit << "%\n";
 
         if (simulator_) {
+            // NEW: do a full USDT estimation first
             auto ob1 = obm_->getOrderBook(tri.path[0]);
             auto ob2 = obm_->getOrderBook(tri.path[1]);
             auto ob3 = obm_->getOrderBook(tri.path[2]);
 
-            std::cout << "[SIMULATE] ... with profit: " << bestProfit << "\n";
+            double estProfitUSDT = simulator_->estimateTriangleProfitUSDT(tri, ob1, ob2, ob3);
+            if (estProfitUSDT < 0.0) {
+                std::cout << "[SCAN] Full-triangle check => negative or fail => skipping.\n";
+                return;
+            }
+            // Optionally define your own min USDT threshold
+            if (estProfitUSDT < 2.0) {
+                // or load from config
+                std::cout << "[SCAN] Full-triangle check => " 
+                          << estProfitUSDT << " < 2 USDT => skip\n";
+                return;
+            }
+
+            std::cout << "[SIMULATE] Pre-check => +"
+                      << estProfitUSDT << " USDT (est). Doing the real trade.\n";
+
+            // Now we do the actual trade
             simulator_->simulateTradeDepthWithWallet(tri, ob1, ob2, ob3);
             simulator_->printWallet();
         }
@@ -132,7 +149,7 @@ double TriangleScanner::calculateProfit(const Triangle& tri) {
     if (!obm_) return -999;
     if (tri.path.size() < 3) return -999;
 
-    // Example check (you can remove or adjust as needed)
+    // Example check (adjust to your liking)
     if (tri.path[0] != "BTCUSDT" && tri.path[0] != "ETHUSDT") {
         return -999;
     }
@@ -141,9 +158,9 @@ double TriangleScanner::calculateProfit(const Triangle& tri) {
     auto ob2 = obm_->getOrderBook(tri.path[1]);
     auto ob3 = obm_->getOrderBook(tri.path[2]);
 
-    if (ob1.bids.empty() || ob1.asks.empty() ||
-        ob2.bids.empty() || ob2.asks.empty() ||
-        ob3.bids.empty() || ob3.asks.empty()){
+    if (ob1.bids.empty()|| ob1.asks.empty()||
+        ob2.bids.empty()|| ob2.asks.empty()||
+        ob3.bids.empty()|| ob3.asks.empty()){
         return -999;
     }
 
@@ -154,23 +171,22 @@ double TriangleScanner::calculateProfit(const Triangle& tri) {
     double bid3 = ob3.bids[0].price;
     double ask3 = ob3.asks[0].price;
 
-    double fee = 0.001;
-    double amount = 1.0;
-    if (tri.path[0] == "BTCUSDT") {
-        amount = (amount * bid1) * (1.0 - fee);
-        amount = (amount / ask2) * (1.0 - fee);
-        amount = (amount * bid3) * (1.0 - fee);
+    double fee=0.001;
+    double amount=1.0;
+    if (tri.path[0]=="BTCUSDT") {
+        amount=(amount*bid1)*(1.0 - fee);
+        amount=(amount/ask2)*(1.0 - fee);
+        amount=(amount*bid3)*(1.0 - fee);
     } else {
-        amount = (amount / ask1) * (1.0 - fee);
-        amount = (amount * bid2) * (1.0 - fee);
-        amount = (amount * bid3) * (1.0 - fee);
+        amount=(amount/ask1)*(1.0 - fee);
+        amount=(amount*bid2)*(1.0 - fee);
+        amount=(amount*bid3)*(1.0 - fee);
     }
 
-    double profitPercent = (amount - 1.0) * 100.0;
+    double profitPercent= (amount-1.0)*100.0;
     return profitPercent;
 }
 
-// Concurrency method to scan all known symbols in parallel
 void TriangleScanner::scanAllSymbolsConcurrently() {
     std::vector<std::string> allSymbols;
     allSymbols.reserve(symbolToTriangles_.size());
@@ -178,7 +194,6 @@ void TriangleScanner::scanAllSymbolsConcurrently() {
         allSymbols.push_back(kv.first);
     }
 
-    // Submit a job per symbol
     std::vector<std::future<void>> futures;
     futures.reserve(allSymbols.size());
     for (auto& symbol : allSymbols) {
@@ -187,13 +202,11 @@ void TriangleScanner::scanAllSymbolsConcurrently() {
         }));
     }
 
-    // Wait for all
     for (auto& fut : futures) {
         fut.wait();
     }
 }
 
-// Structured logging of scans
 void TriangleScanner::logScanResult(const std::string& symbol,
                                     int triCount,
                                     double bestProfit,

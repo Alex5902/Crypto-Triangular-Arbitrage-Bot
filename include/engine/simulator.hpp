@@ -12,17 +12,14 @@
 #include "core/wallet.hpp"
 #include "exchange/i_exchange_executor.hpp"
 
-/**
- * parseSymbol => given "BTCUSDT" returns {"BTC","USDT"} 
- */
+// We'll declare parseSymbol here so we can use it in the .cpp
 std::pair<std::string,std::string> parseSymbol(const std::string& pair);
 
 /**
- * The Simulator can run in liveMode or dryMode:
- *  - If liveMode_ == false => pure depth-based simulation
- *  - If liveMode_ == true  => calls placeMarketOrder(...) on your real or dry executor
- * 
- * Now includes a "slippage-adjusted profitability" pre-check.
+ * Depth-aware simulator with optional live trades.
+ *
+ * Includes:
+ *   - estimateTriangleProfitUSDT(...) for full 3-leg pre-check
  */
 class Simulator {
 public:
@@ -33,16 +30,18 @@ public:
               double minFillRatio,
               Wallet* sharedWallet,
               IExchangeExecutor* executor,
-              double minProfitUSDT);
+              double minProfitUSDT);  // <-- ADDED THIS 8th parameter
 
+    // toggles real trades or simulation
     void setLiveMode(bool live) { liveMode_ = live; }
 
-    /**
-     * The main 3-leg function. 
-     * 1) Estimates final USDT if all legs fill with no big slippage.
-     * 2) If profitable => does the real trade (live or sim).
-     */
     bool simulateTradeDepthWithWallet(const Triangle& tri,
+                                      const OrderBookData& ob1,
+                                      const OrderBookData& ob2,
+                                      const OrderBookData& ob3);
+
+    // estimate final USDT if we fully execute tri with your depth-based sim
+    double estimateTriangleProfitUSDT(const Triangle& tri,
                                       const OrderBookData& ob1,
                                       const OrderBookData& ob2,
                                       const OrderBookData& ob3);
@@ -60,16 +59,6 @@ public:
     double getCumulativeProfit() const;
 
 private:
-    // Helper to do a partial "dry-run" for the 3 legs to see final USDT
-    // This does NOT modify the wallet. It just estimates final USDT after 3 legs.
-    // Returns final USDT or <0 on failure.
-    double estimateTriangleProfit(const Triangle& tri,
-                                  const OrderBookData& ob1,
-                                  const OrderBookData& ob2,
-                                  const OrderBookData& ob3,
-                                  double startValUSDT);
-
-    // The normal "simulate or live-trade" code for each leg
     bool doLeg(WalletTransaction& tx,
                const std::string& pairName,
                const OrderBookData& ob);
@@ -79,10 +68,6 @@ private:
                    double desiredQtyBase,
                    bool isSell);
 
-    // figure out which assets are used by "BTCUSDT" => lock them
-    std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
-
-    // Logging
     void logTrade(const std::string& path,
                   double startVal,
                   double endVal,
@@ -96,20 +81,24 @@ private:
                 double slipPct,
                 double latencyMs);
 
+    std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
+
 private:
     std::string logFileName_;
     double feePercent_;
     double slippageTolerance_;
     double volumeLimit_;
     double minFillRatio_;
-    double minProfitUSDT_;
 
     Wallet* wallet_;
     IExchangeExecutor* executor_;
 
     bool liveMode_{false};
 
-    // Shared locks across assets
+    // ADD THIS to match the new constructor parameter
+    double minProfitUSDT_; //<-- We'll store the user-defined minProfit threshold
+
+    // Global locks: asset -> mutex
     static std::map<std::string, std::mutex> assetLocks_;
 
     int totalTrades_{0};
