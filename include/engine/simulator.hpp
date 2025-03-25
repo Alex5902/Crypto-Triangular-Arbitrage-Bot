@@ -15,15 +15,6 @@
 // We'll declare parseSymbol here so we can use it in the .cpp
 std::pair<std::string,std::string> parseSymbol(const std::string& pair);
 
-/**
- * Depth-aware simulator:
- *  - For each leg, we read the entire order book (bids or asks)
- *  - We fill as much as we can across multiple price levels
- *  - Weighted-average fill price
- *  - Then check fill ratio & slippage
- *
- * Now with dynamic symbol parsing for base/quote assets.
- */
 class Simulator {
 public:
     Simulator(const std::string& logFileName,
@@ -33,6 +24,12 @@ public:
               double minFillRatio,
               Wallet* sharedWallet,
               IExchangeExecutor* executor);
+
+    /**
+     * If liveMode is false => do a depth-based simulation.
+     * If liveMode is true  => do actual trades with placeMarketOrder(...).
+     */
+    void setLiveMode(bool live) { liveMode_ = live; }
 
     bool simulateTradeDepthWithWallet(const Triangle& tri,
                                       const OrderBookData& ob1,
@@ -58,10 +55,17 @@ private:
                   double endVal,
                   double profitPercent);
 
-    // Depth-aware approach for each leg
+    // If liveMode==false => the old doLeg simulation
+    // If liveMode==true  => actual placeMarketOrder calls
     bool doLeg(WalletTransaction& tx,
                const std::string& pairName,
                const OrderBookData& ob);
+
+    // For doLeg in live mode
+    bool doLegLive(WalletTransaction& tx,
+                   const std::string& pairName,
+                   double desiredQtyBase,  // how many base units we want to fill
+                   bool isSell);
 
     // log details about each leg
     void logLeg(const std::string& pairName,
@@ -84,6 +88,9 @@ private:
 
     Wallet* wallet_;
     IExchangeExecutor* executor_;
+
+    // NEW: determines if we do real trades or simulation
+    bool liveMode_{false};
 
     static std::map<std::string, std::mutex> assetLocks_;
 

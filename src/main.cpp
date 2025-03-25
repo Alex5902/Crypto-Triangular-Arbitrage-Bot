@@ -9,7 +9,7 @@
 #include "exchange/binance_dry_executor.hpp"
 #include "exchange/binance_real_executor.hpp"
 #include "exchange/binance_account_sync.hpp"
-#include "exchange/key_encryptor.hpp"  // <=== new
+#include "exchange/key_encryptor.hpp"
 
 #include "engine/simulator.hpp"
 #include "engine/triangle_scanner.hpp"
@@ -41,7 +41,15 @@ static void printDashboard(const Simulator& sim) {
     std::cout << "==========================\n";
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // 0) Check CLI args for --live
+    bool useLiveTrades = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--live") {
+            useLiveTrades = true;
+        }
+    }
+
     // 1) Load config
     nlohmann::json cfg = loadConfig("config/bot_config.json");
 
@@ -76,12 +84,13 @@ int main() {
               << " useTestnet=" << (useTestnet?"true":"false")
               << " pairsFile=" << pairsFile << "\n";
 
+    // 2) Decide executor
     IExchangeExecutor* executor = nullptr;
     std::atomic<bool> keepSyncing(true);
     std::thread syncThread;
 
     if (!useTestnet) {
-        // 2) Create dry executor
+        // DRY mode => no real trades
         auto* dryExec = new BinanceDryExecutor(1.0, 150, 28000.0);
         executor = dryExec;
         std::cout << "[EXECUTOR] Using DRY RUN mode.\n";
@@ -103,7 +112,7 @@ int main() {
                 return 1;
             }
         }
-        // read keys.enc
+
         std::string encryptedKeys;
         {
             std::ifstream kf("config/keys.enc");
@@ -115,7 +124,7 @@ int main() {
             buffer << kf.rdbuf();
             encryptedKeys = buffer.str();
         }
-        // let's parse the decrypted result as JSON => { "apiKey":..., "secretKey":... }
+
         std::string decrypted = KeyEncryptor::decryptData(passphrase, encryptedKeys);
         nlohmann::json keyJson;
         try {
@@ -146,6 +155,14 @@ int main() {
     Simulator sim("sim_log.csv", fee, slippage,
                   volLimit, minFill,
                   &wallet, executor);
+
+    // **NEW**: set live mode if user passed --live
+    if (useLiveTrades) {
+        std::cout << "[MAIN] Live execution mode is ENABLED.\n";
+        sim.setLiveMode(true);
+    } else {
+        std::cout << "[MAIN] Live execution mode is OFF (simulation only).\n";
+    }
 
     // 4) Create scanner + orderbook
     TriangleScanner scanner;
