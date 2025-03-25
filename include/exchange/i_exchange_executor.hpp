@@ -2,14 +2,16 @@
 #define I_EXCHANGE_EXECUTOR_HPP
 
 #include <string>
+#include "core/orderbook.hpp"  // so we know OrderBookData
+// #include "some_other_headers_if_needed"
 
 enum class OrderSide { BUY, SELL };
 
 struct OrderResult {
-    bool success;            // did it fill or not
-    double filledQuantity;   // how many base units were filled
-    double avgPrice;         // average fill price
-    double costOrProceeds;   // cost if buy, proceeds if sell
+    bool success;            
+    double filledQuantity;   
+    double avgPrice;         
+    double costOrProceeds;   
     std::string message;
 };
 
@@ -17,17 +19,15 @@ class IExchangeExecutor {
 public:
     virtual ~IExchangeExecutor() = default;
 
-    /**
-     * placeMarketOrder:
-     * @param symbol: e.g. "BTCUSDT"
-     * @param side: BUY or SELL
-     * @param quantityBase: how many base units (e.g. 0.01 BTC)
-     */
+    // existing method
     virtual OrderResult placeMarketOrder(
         const std::string& symbol,
         OrderSide side,
         double quantityBase
     ) = 0;
+
+    // NEW method:
+    virtual OrderBookData getOrderBookSnapshot(const std::string& symbol) = 0;
 };
 
 #endif // I_EXCHANGE_EXECUTOR_HPP

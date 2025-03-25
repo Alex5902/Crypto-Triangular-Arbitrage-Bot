@@ -1,71 +1,91 @@
 #include "core/orderbook.hpp"
-#include "engine/triangle_scanner.hpp" // if we call scanner_->scanTrianglesForSymbol
+#include "engine/triangle_scanner.hpp"
 #include <websocketpp/client.hpp>
 #include <websocketpp/config/asio_client.hpp>
 #include <iostream>
 #include <chrono>
 #include <algorithm>
 #include <thread>
+#include <sstream>
 
 using json = nlohmann::json;
 using WebSocketClient = websocketpp::client<websocketpp::config::asio_tls_client>;
 
+static size_t MAX_STREAMS_PER_CONN = 400; // limit
+
 OrderBookManager::OrderBookManager(TriangleScanner* scanner)
     : running_(true)
     , scanner_(scanner)
-
 {
-    // Spawn the inactivity monitor thread
-    std::thread([this]{
-        while (running_) {
-            for (auto& kv : lastMsgTime_) {
-                auto symbol = kv.first;
-                auto last   = kv.second;
-                auto now    = std::chrono::steady_clock::now();
-                auto diff   = std::chrono::duration_cast<std::chrono::seconds>(now - last).count();
-                if (diff > 30) {
-                    std::cerr << "[WS] No updates for " << symbol << " in 30s, reconnecting...\n";
-                    connectWebSocket(symbol, 2); // small backoff
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
-    }).detach();
+    // We'll do our inactivity or other checks in a dedicated thread as needed
 }
 
 OrderBookManager::~OrderBookManager() {
     running_ = false;
-    for (auto& [symbol, th] : threads_) {
-        if (th.joinable()) {
-            th.join();
+    // If we had a single combined thread, join it
+    for(auto& kv: threads_){
+        if(kv.second.joinable()){
+            kv.second.join();
         }
     }
 }
 
+/**
+ * Instead of opening 1 WS per symbol, we store them in a list to be used in combined streams.
+ * Then call startCombinedStream if not done already.
+ */
 void OrderBookManager::start(const std::string& symbol) {
+    // Just store the symbol in a local vector for combining
     std::lock_guard<std::mutex> lock(globalMutex_);
-    if (threads_.count(symbol) != 0) {
-        return; // already started
-    }
+    // Ensure there's a mutex
+    mutexes_[symbol]; // to lock the book
+    // We won't open a thread yet. We'll gather them and open one combined stream later.
 
-    mutexes_[symbol]; // ensure there's a mutex
-    threads_[symbol] = std::thread(&OrderBookManager::connectWebSocket, this, symbol, 1);
-}
+    // If you want to do multiple partial streams if > 400 symbols:
+    // We'll do a "batch" approach or single approach for brevity. Let's do single for the example.
+    // For production, you'd chunk if more than 400 symbols to avoid URL length limits.
 
-OrderBookData OrderBookManager::getOrderBook(const std::string& symbol) {
-    std::lock_guard<std::mutex> lk(mutexes_[symbol]);
-    if (books_.count(symbol) == 0) {
-        // return empty
-        return OrderBookData{};
-    }
-    return books_[symbol]; // copy
+    // We'll open the combined stream once in a separate method if you prefer.
 }
 
 /**
- * connectWebSocket with exponential backoff in 'backoffSeconds'.
- * If success, we do a normal .run() blocking call. On fail/close, we do reconnection.
+ * We'll define a new method: startCombinedWebSocket() that takes all known symbols, builds the combined URL,
+ * and runs one WebSocket thread.  We'll call this after we've gathered all symbols
+ * or from e.g. loadTrianglesFromBinanceExchangeInfo
  */
-void OrderBookManager::connectWebSocket(const std::string& symbol, int backoffSeconds) {
+void OrderBookManager::startCombinedWebSocket() {
+    // gather all symbols from `mutexes_` keys
+    std::vector<std::string> symList;
+    {
+        std::lock_guard<std::mutex> lk(globalMutex_);
+        for (auto& kv : mutexes_) {
+            symList.push_back(kv.first);
+        }
+    }
+
+    // chunk if needed
+    // for simplicity, do it in one batch (assuming less than 400 or so)
+    std::ostringstream url;
+    url << "wss://stream.binance.com:9443/stream?streams=";
+
+    for (size_t i=0; i<symList.size(); i++){
+        if(i>0) url << "/";
+        std::string lower = symList[i];
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        url << lower << "@depth20@100ms";
+    }
+
+    // create a single thread for this
+    std::thread t([this, fullUrl=url.str()](){
+        connectCombinedWebSocket(fullUrl);
+    });
+    threads_["__combined__"] = std::move(t);
+}
+
+/**
+ * connectCombinedWebSocket => single WebSocket that streams updates for all symbols in one feed
+ */
+void OrderBookManager::connectCombinedWebSocket(const std::string& fullUrl) {
     WebSocketClient client;
     client.init_asio();
 
@@ -75,123 +95,129 @@ void OrderBookManager::connectWebSocket(const std::string& symbol, int backoffSe
         );
     });
 
-    // set message handler
-    client.set_message_handler([this, symbol](websocketpp::connection_hdl, WebSocketClient::message_ptr msg){
-        onMessage(symbol, msg->get_payload());
+    // message handler => parse "stream", "data"
+    client.set_message_handler([this](websocketpp::connection_hdl, WebSocketClient::message_ptr msg){
+        onCombinedMessage(msg->get_payload());
     });
 
-    // onFail & onClose for reconnect
-    client.set_fail_handler([this, symbol, backoffSeconds, &client](websocketpp::connection_hdl hdl){
-        std::cerr << "[WS] Fail handler for " << symbol << ", reconnecting...\n";
-        onFail(symbol, backoffSeconds);
+    // fail/close => attempt reconnect
+    client.set_fail_handler([this, fullUrl, &client](websocketpp::connection_hdl hdl){
+        std::cerr << "[WS-COMBINED] Fail => reconnect\n";
         client.stop();
+        reconnectCombined(fullUrl, 2);
     });
-    client.set_close_handler([this, symbol, backoffSeconds, &client](websocketpp::connection_hdl){
-        std::cerr << "[WS] Close handler for " << symbol << ", reconnecting...\n";
-        onClose(symbol, backoffSeconds);
+    client.set_close_handler([this, fullUrl, &client](websocketpp::connection_hdl){
+        std::cerr << "[WS-COMBINED] Close => reconnect\n";
         client.stop();
+        reconnectCombined(fullUrl, 2);
     });
 
-    // Optional: set up ping/pong (heartbeat)
-    // By default, WebSocket++ does some internal ping/pong but you can do custom:
-    // client.set_ping_handler(...)
-    // client.set_pong_handler(...)
-
-    // For example, 20 levels, 100ms
-    std::string lowerSymbol = symbol;
-    std::transform(lowerSymbol.begin(), lowerSymbol.end(), lowerSymbol.begin(), ::tolower);
-    std::string uri = "wss://stream.binance.com:9443/ws/" + lowerSymbol + "@depth20@100ms";
+    std::cout<<"[WS-COMBINED] Connecting to "<< fullUrl <<"\n";
 
     websocketpp::lib::error_code ec;
-    auto con = client.get_connection(uri, ec);
-    if(ec) {
-        std::cerr << "[WS] connect error for " << symbol << ": " << ec.message() << std::endl;
-        // attempt reconnect with bigger backoff
-        onFail(symbol, backoffSeconds);
+    auto con = client.get_connection(fullUrl, ec);
+    if(ec){
+        std::cerr<<"[WS-COMBINED] connect error: "<< ec.message() <<"\n";
+        reconnectCombined(fullUrl, 2);
         return;
     }
 
-    std::cout << "[WS] Connecting " << symbol << " with backoff=" << backoffSeconds << "s\n";
     client.connect(con);
-
-    // blocking call
-    client.run();
+    client.run();  // blocking
 }
 
-/**
- * onFail => reconnect with exponential backoff
- */
-void OrderBookManager::onFail(const std::string& symbol, int backoff) {
-    // Wait 'backoff' seconds, then do connectWebSocket(symbol, backoff*2).
+void OrderBookManager::reconnectCombined(const std::string& url, int backoff) {
     std::this_thread::sleep_for(std::chrono::seconds(backoff));
-    connectWebSocket(symbol, std::min(backoff*2, 300)); // cap at 5min
+    // in a real system => exponential backoff up to e.g. 5min
+    int nextBackoff = std::min(backoff*2, 300);
+    connectCombinedWebSocket(url);
 }
 
 /**
- * onClose => also reconnect
+ * onCombinedMessage => each JSON has shape:
+ *   { "stream":"btcusdt@depth20@100ms", "data": { "bids":[...], "asks":[...] } }
  */
-void OrderBookManager::onClose(const std::string& symbol, int backoff) {
-    std::this_thread::sleep_for(std::chrono::seconds(backoff));
-    connectWebSocket(symbol, std::min(backoff*2, 300));
-}
-
-/**
- * onMessage => parse depth, store in books_, call partial re-scan
- * We'll do a quick latency measure from msg arrival to partial re-scan completion.
- */
-void OrderBookManager::onMessage(const std::string& symbol, const std::string& payload) {
-    auto t0 = std::chrono::steady_clock::now();
-
-    lastMsgTime_[symbol] = t0; // track last message time for inactivity checks
+void OrderBookManager::onCombinedMessage(const std::string& payload) {
+    auto t0= std::chrono::steady_clock::now();
 
     try {
         json j = json::parse(payload);
-        if (!j.contains("bids") || !j.contains("asks")) {
+        if(!j.contains("stream") || !j.contains("data")) {
+            return;
+        }
+        std::string streamName = j["stream"].get<std::string>();
+        auto dataObj = j["data"];
+
+        // extract symbol from "btcusdt@depth20@100ms" => "BTCUSDT"
+        // e.g. substring up to '@'
+        std::string lowerStream = streamName;
+        size_t atPos = lowerStream.find('@');
+        if(atPos==std::string::npos) return;
+        std::string lowerSymbol = lowerStream.substr(0, atPos);
+        // uppercase it
+        std::string symbol;
+        symbol.reserve(lowerSymbol.size());
+        for(char c: lowerSymbol){
+            symbol.push_back(::toupper(c));
+        }
+
+        if(!dataObj.contains("bids")|| !dataObj.contains("asks")) {
             return;
         }
 
+        // parse bids/asks
         std::vector<OrderBookLevel> newBids;
         std::vector<OrderBookLevel> newAsks;
 
-        for (auto& level : j["bids"]) {
-            double price = std::stod(level[0].get<std::string>());
-            double qty   = std::stod(level[1].get<std::string>());
-            if (qty > 0.0) {
-                newBids.push_back({price, qty});
+        for (auto& lvl : dataObj["bids"]) {
+            double px = std::stod(lvl[0].get<std::string>());
+            double qty= std::stod(lvl[1].get<std::string>());
+            if(qty>0.0){
+                newBids.push_back({px, qty});
             }
         }
-        for (auto& level : j["asks"]) {
-            double price = std::stod(level[0].get<std::string>());
-            double qty   = std::stod(level[1].get<std::string>());
-            if (qty > 0.0) {
-                newAsks.push_back({price, qty});
+        for (auto& lvl : dataObj["asks"]) {
+            double px = std::stod(lvl[0].get<std::string>());
+            double qty= std::stod(lvl[1].get<std::string>());
+            if(qty>0.0){
+                newAsks.push_back({px, qty});
             }
         }
-
         // sort
-        std::sort(newBids.begin(), newBids.end(), [](auto& a, auto& b){
-            return a.price > b.price; 
+        std::sort(newBids.begin(), newBids.end(), [](auto&a,auto&b){
+            return a.price>b.price;
         });
-        std::sort(newAsks.begin(), newAsks.end(), [](auto& a, auto& b){
-            return a.price < b.price; 
+        std::sort(newAsks.begin(), newAsks.end(), [](auto&a,auto&b){
+            return a.price<b.price;
         });
 
         {
             std::lock_guard<std::mutex> lk(mutexes_[symbol]);
-            books_[symbol] = { newBids, newAsks };
+            books_[symbol] = {newBids, newAsks};
         }
 
-        // partial re-scan
-        if (scanner_) {
+        // call partial re-scan
+        if(scanner_){
             scanner_->scanTrianglesForSymbol(symbol);
         }
     }
-    catch (const std::exception& e) {
-        std::cerr << "[WS] Depth parse error: " << e.what() << std::endl;
+    catch(const std::exception& e){
+        std::cerr<<"[WS-COMBINED] parse error: "<< e.what() <<"\n";
     }
 
-    auto t1 = std::chrono::steady_clock::now();
-    auto ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
-    std::cout << "[LATENCY] " << symbol << " message => partial re-scan took "
-              << ms << " ms\n";
+    auto t1= std::chrono::steady_clock::now();
+    double ms= std::chrono::duration<double,std::milli>(t1 - t0).count();
+    // Debug log
+    std::cout<<"[COMBINED-LATENCY] msg => partial re-scan took "<< ms <<" ms\n";
+}
+
+/**
+ * This is the same getOrderBook logic but it references the single books_ map
+ */
+OrderBookData OrderBookManager::getOrderBook(const std::string& symbol) {
+    std::lock_guard<std::mutex> lk(mutexes_[symbol]);
+    if(books_.count(symbol)==0){
+        return OrderBookData{};
+    }
+    return books_[symbol];
 }

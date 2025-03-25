@@ -13,9 +13,6 @@
 #include "core/wallet.hpp"
 #include "exchange/i_exchange_executor.hpp"
 
-// We'll declare parseSymbol here so we can use it in the .cpp
-std::pair<std::string,std::string> parseSymbol(const std::string& pair);
-
 /**
  * Represents the minNotional / minQty filters for a given symbol.
  */
@@ -25,11 +22,26 @@ struct SymbolFilter {
 };
 
 /**
+ * parseSymbol => extracts base vs quote from a symbol string
+ */
+std::pair<std::string,std::string> parseSymbol(const std::string& pair);
+
+/**
+ * A small struct to hold simulation results for multiple triangles
+ */
+struct SimCandidate {
+    int triIndex;            // index in your vector of triangles
+    double estimatedProfit;  // e.g. final USDT gain
+};
+
+/**
  * Depth-aware simulator with optional live trades.
- *
- * Includes:
- *   - estimateTriangleProfitUSDT(...) for full 3-leg pre-check
- *   - enforcement of minNotional / minQty filters
+ * 
+ * Includes concurrency methods for multi-triangle simulation.
+ * Now includes a more robust "atomic" execution approach:
+ * - If any leg fails, we attempt to revert or skip the entire trade.
+ * - For real trades, we do a best-effort approach, but cannot truly revert
+ *   a partially filled exchange order.
  */
 class Simulator {
 public:
@@ -40,22 +52,34 @@ public:
               double minFillRatio,
               Wallet* sharedWallet,
               IExchangeExecutor* executor,
-              double minProfitUSDT);  // <-- constructor
+              double minProfitUSDT);
 
-    // toggles real trades or simulation
     void setLiveMode(bool live) { liveMode_ = live; }
 
+    /**
+     * The main "atomic" trading function. If it detects negative or insufficient profit,
+     * it skips. If any leg fails, it rolls back the entire local wallet transaction.
+     *
+     * Real exchange trades can't be undone, so in a real scenario you'd do a "reversal" trade
+     * if Leg 2 or 3 fails. See code comments below.
+     */
     bool simulateTradeDepthWithWallet(const Triangle& tri,
                                       const OrderBookData& ob1,
                                       const OrderBookData& ob2,
                                       const OrderBookData& ob3);
 
-    // estimate final USDT if we fully execute tri with your depth-based sim
+    /**
+     * Offline profitability check. Loops through partial fills on each OB,
+     * returns final net profit in USDT or -1 if fail.
+     */
     double estimateTriangleProfitUSDT(const Triangle& tri,
                                       const OrderBookData& ob1,
                                       const OrderBookData& ob2,
                                       const OrderBookData& ob3);
 
+    /**
+     * Legacy leftover, not used now
+     */
     double simulateTrade(const Triangle& tri,
                          double currentBalance,
                          double bid1, double ask1,
@@ -64,11 +88,27 @@ public:
 
     void printWallet() const;
 
-    // For TUI
     int getTotalTrades() const;
     double getCumulativeProfit() const;
 
+    // concurrency to estimate many triangles
+    std::vector<SimCandidate> simulateMultipleTrianglesConcurrently(
+        const std::vector<Triangle>& triangles);
+
+    // optionally run real trades in sequence for the best N
+    void executeTopCandidatesSequentially(const std::vector<Triangle>& triangles,
+                                          const std::vector<SimCandidate>& simCandidates,
+                                          int bestN,
+                                          double minUSDTprofit);
+
+    // optional CSV export
+    void exportSimCandidatesCSV(const std::string& filename,
+                                const std::vector<Triangle>& triangles,
+                                const std::vector<SimCandidate>& candidates,
+                                int topN=50);
+
 private:
+    // internal leg logic, either local or real
     bool doLeg(WalletTransaction& tx,
                const std::string& pairName,
                const OrderBookData& ob);
@@ -82,7 +122,6 @@ private:
                   double startVal,
                   double endVal,
                   double profitPercent);
-
     void logLeg(const std::string& pairName,
                 const std::string& side,
                 double requestedQty,
@@ -92,11 +131,7 @@ private:
                 double latencyMs);
 
     std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
-
-    // NEW: load filters from JSON
     void loadSymbolFilters(const std::string& path);
-
-    // helper to check filters on a trade (local sim or live)
     bool passesExchangeFilters(const std::string& symbol,
                                double quantityBase,
                                double priceEstimate);
@@ -110,18 +145,16 @@ private:
 
     Wallet* wallet_;
     IExchangeExecutor* executor_;
-
     bool liveMode_{false};
 
-    double minProfitUSDT_; //<-- user-defined minProfit threshold
+    double minProfitUSDT_;
 
-    // Global locks: asset -> mutex
     static std::map<std::string, std::mutex> assetLocks_;
 
     int totalTrades_{0};
     double cumulativeProfit_{0.0};
 
-    // NEW: symbol -> filter (minNotional, minQty)
+    // symbol -> filter
     std::unordered_map<std::string, SymbolFilter> symbolFilters_;
 };
 

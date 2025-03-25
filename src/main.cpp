@@ -55,8 +55,6 @@ int main(int argc, char** argv) {
 
     double fee          = cfg.value("fee", 0.001);
     double slippage     = cfg.value("slippage", 0.005);
-    // OLD: double volLimit = cfg.value("volumeLimit", 1.0);
-    // NEW: adaptive fraction
     double maxFraction  = cfg.value("maxFractionPerTrade", 0.5); 
     double minFill      = cfg.value("minFill", 0.2);
     double threshold    = cfg.value("threshold", 0.0);
@@ -159,9 +157,8 @@ int main(int argc, char** argv) {
     }
 
     // 3) Create simulator
-    // Reinterpret 4th param as "maxFractionTrade_" instead of volumeLimit
     Simulator sim("sim_log.csv", fee, slippage,
-                  maxFraction, // was volLimit
+                  maxFraction, // interpret as fraction of free balance
                   minFill,
                   &wallet, executor, minProfit);
 
@@ -181,17 +178,31 @@ int main(int argc, char** argv) {
     // 5) pass simulator to scanner
     scanner.setSimulator(&sim);
 
-    // 6) load pairs
-    scanner.loadTrianglesFromFile(pairsFile);
+    // 6) dynamic load from /exchangeInfo => BFS-based cycle detection
+    // If that fails, fallback to file
+    if (!scanner.loadTrianglesFromBinanceExchangeInfo()) {
+        std::cerr << "[MAIN] Could not load dynamic triangles => fallback to file: " << pairsFile << "\n";
+        scanner.loadTrianglesFromFile(pairsFile);
+    }
     scanner.setMinProfitThreshold(threshold);
 
-    std::cout << "Bot running. Press Ctrl+C to quit.\n";
+    // Now that all symbols are known (from BFS or file),
+    // we open a single combined WebSocket for them:
+    obm.startCombinedWebSocket();
+
+    std::cout << "[MAIN] Bot running. Press Ctrl+C to quit.\n";
 
     // 7) main loop
+    // Optionally: we could re-score all triangles here every 30s, then trade top N
+    // For now, we just do a TUI print:
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(30));
         wallet.printAll();
         printDashboard(sim);
+
+        // Example of re-scoring:
+        //   1) scanner.rescoreAllTrianglesConcurrently(...);
+        //   2) pick top X from scanner, or do an external approach
     }
 
     // cleanup on exit

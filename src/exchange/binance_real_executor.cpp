@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include "core/orderbook.hpp"
+#include <iostream>
 
 using json = nlohmann::json;
 
@@ -16,14 +18,17 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
     return size * nmemb;
 }
 
+// Updated constructor includes an optional OrderBookManager*
 BinanceRealExecutor::BinanceRealExecutor(const std::string& apiKey,
                                          const std::string& secretKey,
-                                         const std::string& baseUrl)
+                                         const std::string& baseUrl,
+                                         OrderBookManager* obm)
   : apiKey_(apiKey)
   , secretKey_(secretKey)
   , baseUrl_(baseUrl)
+  , obm_(obm)
 {
-    // Optionally init curl global here
+    // Optionally init curl globally
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
@@ -38,22 +43,21 @@ OrderResult BinanceRealExecutor::placeMarketOrder(const std::string& symbol,
     res.costOrProceeds = 0.0;
     res.message = "";
 
-    // We’ll place a MARKET order on /api/v3/order
+    // We'll place a MARKET order on /api/v3/order
     // For testnet, we append `recvWindow=5000` & timestamp & signature
-    // We also do a simplistic assumption that the order is fully filled instantly.
+    // We'll do a simplistic assumption that the order is fully filled instantly.
 
-    // The side: “BUY” or “SELL”
     std::string sideStr = (side == OrderSide::BUY) ? "BUY" : "SELL";
 
     // quantity => to string with some fixed precision
     std::ostringstream qtySs;
-    qtySs << std::fixed << std::setprecision(8) << quantityBase; 
+    qtySs << std::fixed << std::setprecision(8) << quantityBase;
 
     long nowMs = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
 
-    // build query
+    // Build query
     std::ostringstream qs;
     qs << "symbol=" << symbol
        << "&side=" << sideStr
@@ -94,7 +98,7 @@ OrderResult BinanceRealExecutor::placeMarketOrder(const std::string& symbol,
 
     // If success
     res.success = true;
-    // We can check “executedQty” and “cummulativeQuoteQty”
+    // We can check "executedQty" and "cummulativeQuoteQty"
     double executedQty = std::stod( j.value("executedQty","0.0") );
     double cummQuote   = std::stod( j.value("cummulativeQuoteQty","0.0") );
 
@@ -115,6 +119,19 @@ OrderResult BinanceRealExecutor::placeMarketOrder(const std::string& symbol,
     return res;
 }
 
+// NEW: Provide local snapshot from our OrderBookManager if we have it.
+// If you want an actual REST call to /api/v3/depth?symbol=..., 
+// you could do that here instead.
+OrderBookData BinanceRealExecutor::getOrderBookSnapshot(const std::string& symbol)
+{
+    if (!obm_) {
+        std::cerr << "[REAL] No OrderBookManager => returning empty OB\n";
+        return OrderBookData{}; // empty
+    }
+    // Or do real HTTP call for a fresh snapshot...
+    return obm_->getOrderBook(symbol);
+}
+
 // sign with HMAC SHA256
 std::string BinanceRealExecutor::signQueryString(const std::string& query) const {
     unsigned char* hmac_result = nullptr;
@@ -125,7 +142,7 @@ std::string BinanceRealExecutor::signQueryString(const std::string& query) const
 
     // convert to hex
     std::ostringstream hex_stream;
-    for (int i=0; i<32; i++) {
+    for (int i = 0; i < 32; i++) {
         hex_stream << std::hex << std::setw(2) << std::setfill('0')
                    << (int)hmac_result[i];
     }
@@ -148,7 +165,7 @@ std::string BinanceRealExecutor::httpRequest(const std::string& method,
     }
 
     std::string readBuffer;
-    struct curl_slist *chunk = nullptr;
+    struct curl_slist* chunk = nullptr;
     // set headers
     chunk = curl_slist_append(chunk, ("X-MBX-APIKEY: " + apiKey_).c_str());
     chunk = curl_slist_append(chunk, "Content-Type: application/x-www-form-urlencoded");

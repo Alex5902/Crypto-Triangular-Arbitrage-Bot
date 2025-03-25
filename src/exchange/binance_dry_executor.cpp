@@ -4,16 +4,19 @@
 #include <cmath>
 #include <iostream>
 #include <random> // for random_device, mt19937, uniform_real_distribution
+#include "core/orderbook.hpp"        // so we can return OrderBookData
 
 BinanceDryExecutor::BinanceDryExecutor(double fillRatio,
                                        int baseLatencyMs,
                                        double mockPrice,
-                                       double slippageBps)
+                                       double slippageBps,
+                                       OrderBookManager* obm)
   : fillRatio_(fillRatio)
   , baseLatencyMs_(baseLatencyMs)
   , mockPrice_(mockPrice)
   , slippageBps_(slippageBps)
-{}
+  , obm_(obm) // store the pointer
+{ }
 
 OrderResult BinanceDryExecutor::placeMarketOrder(const std::string& symbol,
                                                  OrderSide side,
@@ -40,7 +43,7 @@ OrderResult BinanceDryExecutor::placeMarketOrder(const std::string& symbol,
     }
 
     // We do partial fill logic by random factor around fillRatio_
-    // e.g. if fillRatio_ = 1.0 but random partial is 70% => 0.7
+    // e.g. if fillRatio_ = 1.0 but random partial is 70% => multiply by 0.7
     {
         static thread_local std::mt19937 rng( std::random_device{}() );
         std::uniform_real_distribution<double> dist(0.5, 1.0); 
@@ -48,22 +51,17 @@ OrderResult BinanceDryExecutor::placeMarketOrder(const std::string& symbol,
         res.filledQuantity = quantityBase * fillRatio_ * partialFactor;
     }
 
-    // Now do a simple slippage calc based on side + quantity
-    double slipRatio = 0.0;
-    // Example function: slip = slippageBps_ * quantity / 10000
-    slipRatio = (quantityBase * slippageBps_) / 10000.0;
-
+    // Simple slippage calc
+    double slipRatio = (quantityBase * slippageBps_) / 10000.0;
     double sideFactor = (side == OrderSide::BUY ? +1.0 : -1.0);
     double adjustedPrice = mockPrice_ * (1.0 + sideFactor * slipRatio);
 
     res.avgPrice = adjustedPrice;
-
-    // cost or proceeds
     res.costOrProceeds = res.filledQuantity * res.avgPrice;
 
     // Debug
     std::cout << "[DRY] symbol=" << symbol
-              << " side=" << (side==OrderSide::BUY?"BUY":"SELL")
+              << " side=" << (side==OrderSide::BUY ? "BUY" : "SELL")
               << " qtyReq=" << quantityBase
               << " finalQty=" << res.filledQuantity
               << " fillRatioParam=" << fillRatio_
@@ -76,6 +74,17 @@ OrderResult BinanceDryExecutor::placeMarketOrder(const std::string& symbol,
     return res;
 }
 
+// NEW: getOrderBookSnapshot => fetch from our obm_ if present
+OrderBookData BinanceDryExecutor::getOrderBookSnapshot(const std::string& symbol)
+{
+    if (!obm_) {
+        std::cerr << "[DRY] No OrderBookManager provided => returning empty OB\n";
+        return OrderBookData{}; // empty
+    }
+    return obm_->getOrderBook(symbol);
+}
+
+// existing helper for test
 void BinanceDryExecutor::setMockPrice(double px) {
     mockPrice_ = px;
 }
