@@ -36,7 +36,7 @@ public:
     Simulator(const std::string& logFileName,
               double feePercent,
               double slippageTolerance,
-              double volumeLimit,
+              double maxFractionPerTrade,
               double minFillRatio,
               Wallet* sharedWallet,
               IExchangeExecutor* executor,
@@ -105,7 +105,7 @@ private:
     std::string logFileName_;
     double feePercent_;
     double slippageTolerance_;
-    double volumeLimit_;
+    double maxFractionPerTrade_;
     double minFillRatio_;
 
     Wallet* wallet_;

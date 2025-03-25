@@ -53,13 +53,15 @@ int main(int argc, char** argv) {
     // 1) Load config
     nlohmann::json cfg = loadConfig("config/bot_config.json");
 
-    double fee        = cfg.value("fee", 0.001);
-    double slippage   = cfg.value("slippage", 0.005);
-    double volLimit   = cfg.value("volumeLimit", 1.0);
-    double minFill    = cfg.value("minFill", 0.2);
-    double threshold  = cfg.value("threshold", 0.0);
-    bool useTestnet   = cfg.value("useTestnet", false);
-    double minProfit  = cfg.value("minProfitUSDT", 0.5);
+    double fee          = cfg.value("fee", 0.001);
+    double slippage     = cfg.value("slippage", 0.005);
+    // OLD: double volLimit = cfg.value("volumeLimit", 1.0);
+    // NEW: adaptive fraction
+    double maxFraction  = cfg.value("maxFractionPerTrade", 0.5); 
+    double minFill      = cfg.value("minFill", 0.2);
+    double threshold    = cfg.value("threshold", 0.0);
+    bool useTestnet     = cfg.value("useTestnet", false);
+    double minProfit    = cfg.value("minProfitUSDT", 0.5);
     std::string pairsFile = cfg.value("pairsFile", "config/pairs.json");
 
     // 1b) Load wallet from config
@@ -79,7 +81,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[CONFIG] fee=" << fee
               << " slip=" << slippage
-              << " volLimit=" << volLimit
+              << " maxFraction=" << maxFraction
               << " minFill=" << minFill
               << " threshold=" << threshold
               << " useTestnet=" << (useTestnet?"true":"false")
@@ -97,9 +99,6 @@ int main(int argc, char** argv) {
         std::cout << "[EXECUTOR] Using DRY RUN mode.\n";
     } else {
         // We use testnet with encrypted keys
-        //  - read passphrase from config/passphrase.txt
-        //  - read encrypted data from config/keys.enc
-        //  - decrypt => real apiKey, secretKey
         std::string passphrase;
         {
             std::ifstream pf("config/passphrase.txt");
@@ -126,7 +125,14 @@ int main(int argc, char** argv) {
             encryptedKeys = buffer.str();
         }
 
-        std::string decrypted = KeyEncryptor::decryptData(passphrase, encryptedKeys);
+        std::string decrypted;
+        try {
+            decrypted = KeyEncryptor::decryptData(passphrase, encryptedKeys);
+        } catch(...) {
+            std::cerr << "[EXECUTOR] Decrypted text not valid!\n";
+            return 1;
+        }
+
         nlohmann::json keyJson;
         try {
             keyJson = nlohmann::json::parse(decrypted);
@@ -153,11 +159,13 @@ int main(int argc, char** argv) {
     }
 
     // 3) Create simulator
+    // Reinterpret 4th param as "maxFractionTrade_" instead of volumeLimit
     Simulator sim("sim_log.csv", fee, slippage,
-                  volLimit, minFill,
+                  maxFraction, // was volLimit
+                  minFill,
                   &wallet, executor, minProfit);
 
-    // **NEW**: set live mode if user passed --live
+    // set live mode if user passed --live
     if (useLiveTrades) {
         std::cout << "[MAIN] Live execution mode is ENABLED.\n";
         sim.setLiveMode(true);
