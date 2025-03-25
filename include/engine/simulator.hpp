@@ -12,9 +12,18 @@
 #include "core/wallet.hpp"
 #include "exchange/i_exchange_executor.hpp"
 
-// We'll declare parseSymbol here so we can use it in the .cpp
+/**
+ * parseSymbol => given "BTCUSDT" returns {"BTC","USDT"} 
+ */
 std::pair<std::string,std::string> parseSymbol(const std::string& pair);
 
+/**
+ * The Simulator can run in liveMode or dryMode:
+ *  - If liveMode_ == false => pure depth-based simulation
+ *  - If liveMode_ == true  => calls placeMarketOrder(...) on your real or dry executor
+ * 
+ * Now includes a "slippage-adjusted profitability" pre-check.
+ */
 class Simulator {
 public:
     Simulator(const std::string& logFileName,
@@ -23,14 +32,16 @@ public:
               double volumeLimit,
               double minFillRatio,
               Wallet* sharedWallet,
-              IExchangeExecutor* executor);
+              IExchangeExecutor* executor,
+              double minProfitUSDT);
 
-    /**
-     * If liveMode is false => do a depth-based simulation.
-     * If liveMode is true  => do actual trades with placeMarketOrder(...).
-     */
     void setLiveMode(bool live) { liveMode_ = live; }
 
+    /**
+     * The main 3-leg function. 
+     * 1) Estimates final USDT if all legs fill with no big slippage.
+     * 2) If profitable => does the real trade (live or sim).
+     */
     bool simulateTradeDepthWithWallet(const Triangle& tri,
                                       const OrderBookData& ob1,
                                       const OrderBookData& ob2,
@@ -49,25 +60,34 @@ public:
     double getCumulativeProfit() const;
 
 private:
-    // Logging for entire 3-leg trade
+    // Helper to do a partial "dry-run" for the 3 legs to see final USDT
+    // This does NOT modify the wallet. It just estimates final USDT after 3 legs.
+    // Returns final USDT or <0 on failure.
+    double estimateTriangleProfit(const Triangle& tri,
+                                  const OrderBookData& ob1,
+                                  const OrderBookData& ob2,
+                                  const OrderBookData& ob3,
+                                  double startValUSDT);
+
+    // The normal "simulate or live-trade" code for each leg
+    bool doLeg(WalletTransaction& tx,
+               const std::string& pairName,
+               const OrderBookData& ob);
+
+    bool doLegLive(WalletTransaction& tx,
+                   const std::string& pairName,
+                   double desiredQtyBase,
+                   bool isSell);
+
+    // figure out which assets are used by "BTCUSDT" => lock them
+    std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
+
+    // Logging
     void logTrade(const std::string& path,
                   double startVal,
                   double endVal,
                   double profitPercent);
 
-    // If liveMode==false => the old doLeg simulation
-    // If liveMode==true  => actual placeMarketOrder calls
-    bool doLeg(WalletTransaction& tx,
-               const std::string& pairName,
-               const OrderBookData& ob);
-
-    // For doLeg in live mode
-    bool doLegLive(WalletTransaction& tx,
-                   const std::string& pairName,
-                   double desiredQtyBase,  // how many base units we want to fill
-                   bool isSell);
-
-    // log details about each leg
     void logLeg(const std::string& pairName,
                 const std::string& side,
                 double requestedQty,
@@ -76,22 +96,20 @@ private:
                 double slipPct,
                 double latencyMs);
 
-    // Used only for locking assets needed by each triangle
-    std::vector<std::string> getAssetsForPair(const std::string& pairName) const;
-
 private:
     std::string logFileName_;
     double feePercent_;
     double slippageTolerance_;
     double volumeLimit_;
     double minFillRatio_;
+    double minProfitUSDT_;
 
     Wallet* wallet_;
     IExchangeExecutor* executor_;
 
-    // NEW: determines if we do real trades or simulation
     bool liveMode_{false};
 
+    // Shared locks across assets
     static std::map<std::string, std::mutex> assetLocks_;
 
     int totalTrades_{0};

@@ -7,6 +7,7 @@
     "useTestnet": true,
     "encryptKeys": true,
     "pairsFile": "config/pairs.json",
+    "minProfitUSDT": 0.5,
     "walletInit": {
       "BTC": 0.0,
       "ETH": 0.0,

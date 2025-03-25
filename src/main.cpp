@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
     double minFill    = cfg.value("minFill", 0.2);
     double threshold  = cfg.value("threshold", 0.0);
     bool useTestnet   = cfg.value("useTestnet", false);
+    double minProfit  = cfg.value("minProfitUSDT", 0.5);
     std::string pairsFile = cfg.value("pairsFile", "config/pairs.json");
 
     // 1b) Load wallet from config
@@ -154,7 +155,7 @@ int main(int argc, char** argv) {
     // 3) Create simulator
     Simulator sim("sim_log.csv", fee, slippage,
                   volLimit, minFill,
-                  &wallet, executor);
+                  &wallet, executor, minProfit);
 
     // **NEW**: set live mode if user passed --live
     if (useLiveTrades) {
