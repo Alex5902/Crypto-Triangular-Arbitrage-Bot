@@ -188,6 +188,9 @@ int main(int argc, char** argv) {
     // 5) pass simulator to scanner
     scanner.setSimulator(&sim);
 
+    // (NEW) let's also configure a 10s cooldown:
+    scanner.setTriangleCooldownSeconds(10.0);
+
     // 6) dynamic load from /exchangeInfo => BFS-based cycle detection
     // If that fails, fallback to file
     if (!scanner.loadTrianglesFromBinanceExchangeInfo()) {

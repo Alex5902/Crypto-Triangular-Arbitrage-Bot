@@ -290,6 +290,7 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
                   << bestProfit << "%\n";
 
         if(simulator_){
+            // build local OB
             auto ob1= obm_->getOrderBook(tri.path[0]);
             auto ob2= obm_->getOrderBook(tri.path[1]);
             auto ob3= obm_->getOrderBook(tri.path[2]);
@@ -300,6 +301,34 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
             } else if(estProfitUSDT<2.0){
                 std::cout<<"[SCAN] => "<< estProfitUSDT <<" < 2 USDT => skip\n";
             } else {
+                // COOLDOWN CHECK
+                std::string triKey = makeTriangleKey(tri);
+
+                // lock + check
+                {
+                    std::lock_guard<std::mutex> cdLock(cooldownMutex_);
+                    auto now = std::chrono::steady_clock::now();
+                    auto itCd = lastAttemptMap_.find(triKey);
+                    if(itCd != lastAttemptMap_.end()){
+                        double elapsed = std::chrono::duration<double>(now - itCd->second).count();
+                        if(elapsed < triangleCooldownSeconds_){
+                            std::cout << "[COOLDOWN] Skipping triKey=" << triKey
+                                      << " => only " << elapsed << "s elapsed < "
+                                      << triangleCooldownSeconds_ << "s\n";
+                            // skip trading
+                            auto t1 = std::chrono::steady_clock::now();
+                            double ms = std::chrono::duration<double,std::milli>(t1 - t0).count();
+                            std::cout<<"[SCANNER LATENCY] symbol="<< symbol
+                                     <<" took "<< ms <<" ms\n";
+                            logScanResult(symbol, (int)allTris.size(), bestProfit, ms);
+                            return;
+                        }
+                    }
+                    // if not on cooldown => we proceed + set lastAttemptMap_
+                    lastAttemptMap_[triKey] = now;
+                }
+
+                // Now we actually do the trade
                 std::cout<<"[SIMULATE] => +"<< estProfitUSDT <<" USDT => do real trade.\n";
                 simulator_->simulateTradeDepthWithWallet(tri, ob1, ob2, ob3);
                 simulator_->printWallet();
@@ -436,8 +465,8 @@ bool TriangleScanner::getBestTriangle(double& outProfit, Triangle& outTri) {
 }
 
 /** 
- * NEW #1: Re-check all triangles in parallel, update bestTriangles_, 
- * optionally produce a sorted list of results above minProfitPct.
+ * Re-check all discovered triangles in parallel, store results in bestTriangles_, 
+ * optionally also return a sorted list of triangles above minProfitPct.
  */
 void TriangleScanner::rescoreAllTrianglesConcurrently(
     double minProfitPct,
@@ -445,7 +474,6 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
 {
     if(triangles_.empty()) return;
 
-    // concurrency over all triangle indices
     std::vector<std::future<double>> futs;
     futs.reserve(triangles_.size());
 
@@ -455,7 +483,6 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
         }));
     }
 
-    // We'll store in a local vector
     std::vector<double> profits(triangles_.size());
 
     // gather
@@ -463,15 +490,12 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
         profits[i] = futs[i].get();
     }
 
-    // now update bestTriangles_ (threadsafe)
     {
         std::lock_guard<std::mutex> lk(bestTriMutex_);
-        // clear out old queue
         while(!bestTriangles_.empty()) bestTriangles_.pop();
-        // push new
         for(size_t i=0; i< profits.size(); i++){
             double pf = profits[i];
-            lastProfits_[i] = pf; // store
+            lastProfits_[i] = pf;
             if(pf >= minProfitPct){
                 TriPriority item;
                 item.profit = pf;
@@ -481,7 +505,7 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
         }
     }
 
-    // if user wants a sorted list, produce it
+    // optional sorted output
     if(outSorted){
         outSorted->clear();
         outSorted->reserve(triangles_.size());
@@ -491,11 +515,10 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
                 ScoredTriangle sc;
                 sc.triIdx  = (int)i;
                 sc.profit  = pf;
-                sc.netUSDT = 0.0; // if you want to do a deeper USDT sim, do it here
+                sc.netUSDT = 0.0; 
                 outSorted->push_back(sc);
             }
         }
-        // sort descending
         std::sort(outSorted->begin(), outSorted->end(),
                   [](auto&a,auto&b){return a.profit> b.profit;});
     }
@@ -506,56 +529,46 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
 }
 
 /**
- * NEW #2: Export top triangles from bestTriangles_ to CSV
+ * Export top triangles from bestTriangles_
  */
 void TriangleScanner::exportTopTrianglesCSV(const std::string& filename,
                                             int topN,
                                             double minProfitPct)
 {
     std::vector<ScoredTriangle> results;
-    // We'll build a local sorted array from bestTriangles_
     {
         std::lock_guard<std::mutex> lk(bestTriMutex_);
-
-        // make a temporary copy of the queue
         std::priority_queue<TriPriority> tmp = bestTriangles_;
         while(!tmp.empty()){
             TriPriority top = tmp.top();
             tmp.pop();
-            if(top.profit< minProfitPct) break; // or continue
+            if(top.profit< minProfitPct) break;
             ScoredTriangle sc;
             sc.triIdx  = top.triIdx;
             sc.profit  = top.profit;
-            sc.netUSDT = 0.0; // if you want to do a deeper USDT sim, you could
+            sc.netUSDT = 0.0;
             results.push_back(sc);
         }
     }
-
-    // now results is unsorted descending by queue order, but let's ensure it:
     std::sort(results.begin(), results.end(),
               [](auto&a, auto&b){return a.profit> b.profit;});
-
     if((int)results.size()> topN){
         results.resize(topN);
     }
 
-    // open CSV
     std::ofstream fs(filename, std::ios::app);
     if(!fs.is_open()){
         std::cerr<<"[EXPORT] Could not open "<< filename <<"\n";
         return;
     }
-    // optional header
     static bool firstWrite=true;
     if(firstWrite){
-        fs << "timestamp,rank,triIdx,profitPct,path\n";
+        fs<<"timestamp,rank,triIdx,profitPct,path\n";
         firstWrite=false;
     }
-
     auto now = std::chrono::system_clock::now();
     auto now_c= std::chrono::system_clock::to_time_t(now);
     std::string nowStr = std::string(std::ctime(&now_c));
-    // remove trailing newline
     if(!nowStr.empty() && nowStr.back()=='\n') nowStr.pop_back();
 
     int rank=1;
@@ -573,5 +586,19 @@ void TriangleScanner::exportTopTrianglesCSV(const std::string& filename,
     }
     fs.close();
 
-    std::cout<<"[EXPORT] wrote "<< results.size() <<" triangles to "<< filename <<"\n";
+    std::cout<<"[EXPORT] wrote "<< results.size()
+             <<" triangles to "<< filename <<"\n";
+}
+
+// NEW: make a unique string key from tri.path
+std::string TriangleScanner::makeTriangleKey(const Triangle& tri) const {
+    // e.g. "BTCUSDT_FWD->ETHUSDT_INV->XRPBTC_FWD"
+    // or just "BTC->ETH->USDT" if you prefer ignoring _FWD/_INV
+    // We'll keep it consistent with tri.path though
+    std::ostringstream oss;
+    for(size_t i=0; i< tri.path.size(); i++){
+        if(i>0) oss<<"->";
+        oss<< tri.path[i];
+    }
+    return oss.str();
 }
