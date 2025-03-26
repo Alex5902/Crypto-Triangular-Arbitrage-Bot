@@ -93,6 +93,11 @@ int main(int argc, char** argv) {
     if (!useTestnet) {
         // DRY mode => no real trades
         auto* dryExec = new BinanceDryExecutor(1.0, 150, 28000.0);
+
+        // Enable throttle (optional)
+        dryExec->setMaxRequestsPerMinute(600); // e.g. half the real limit
+        dryExec->setMaxOrdersPerSecond(5);     // e.g. 5 orders per second
+
         executor = dryExec;
         std::cout << "[EXECUTOR] Using DRY RUN mode.\n";
     } else {
@@ -149,6 +154,11 @@ int main(int argc, char** argv) {
 
         std::string baseUrl = "https://testnet.binance.vision";
         auto* realExec = new BinanceRealExecutor(apiKey, secretKey, baseUrl);
+
+        // Set throttler limits for testnet
+        realExec->setMaxRequestsPerMinute(1200); 
+        realExec->setMaxOrdersPerSecond(10);
+
         executor = realExec;
 
         // spawn a wallet sync thread
