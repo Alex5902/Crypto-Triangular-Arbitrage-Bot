@@ -44,6 +44,16 @@ public:
 
     void printAll() const;
 
+    /**
+     * NEW: Save balances and locked amounts to a JSON file, e.g. "wallet.json".
+     */
+    void saveToFile(const std::string& filename) const;  // ADDED
+
+    /**
+     * NEW: Load balances from JSON file if it exists, overwriting current in-memory state.
+     */
+    bool loadFromFile(const std::string& filename);       // ADDED
+
 private:
     std::unordered_map<std::string,double> balances_;
     std::unordered_map<std::string,double> locked_;

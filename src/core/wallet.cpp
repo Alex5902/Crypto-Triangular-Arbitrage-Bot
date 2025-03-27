@@ -1,5 +1,10 @@
 #include "core/wallet.hpp"
 #include <iostream>
+#include <fstream>
+
+// For JSON
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
 
 Wallet::Wallet() {
     balances_["BTC"]  = 0.0;
@@ -108,5 +113,84 @@ void Wallet::printAll() const {
                   << ": total=" << kv.second 
                   << " locked=" << l
                   << " free=" << f << "\n";
+    }
+}
+
+/**
+ * NEW: Save wallet data to JSON
+ */
+void Wallet::saveToFile(const std::string& filename) const
+{
+    std::lock_guard<std::mutex> lk(walletMutex_);
+
+    json j;
+    // store balances
+    for (auto &kv : balances_) {
+        j["balances"][kv.first] = kv.second;
+    }
+    // store locked
+    for (auto &lv : locked_) {
+        j["locked"][lv.first] = lv.second;
+    }
+
+    // attempt to write
+    std::ofstream ofs(filename);
+    if (!ofs.is_open()) {
+        std::cerr << "[WALLET] Could not open " << filename << " for saving.\n";
+        return;
+    }
+    ofs << j.dump(4); // pretty-print with indentation=4
+    ofs.close();
+
+    std::cout << "[WALLET] Saved balances to " << filename << "\n";
+}
+
+/**
+ * NEW: Load wallet data from JSON
+ */
+bool Wallet::loadFromFile(const std::string& filename)
+{
+    std::lock_guard<std::mutex> lk(walletMutex_);
+
+    std::ifstream ifs(filename);
+    if (!ifs.is_open()) {
+        std::cerr << "[WALLET] Could not open " << filename << " for loading. (Skipping)\n";
+        return false;
+    }
+
+    try {
+        json j;
+        ifs >> j;
+
+        // parse balances
+        if (j.contains("balances") && j["balances"].is_object()) {
+            for (auto it = j["balances"].begin(); it != j["balances"].end(); ++it) {
+                std::string asset = it.key();
+                double bal = it.value().get<double>();
+                balances_[asset] = bal;
+                if (!locked_.count(asset)) {
+                    locked_[asset] = 0.0;
+                }
+            }
+        }
+        // parse locked
+        if (j.contains("locked") && j["locked"].is_object()) {
+            for (auto it = j["locked"].begin(); it != j["locked"].end(); ++it) {
+                std::string asset = it.key();
+                double lockVal = it.value().get<double>();
+                locked_[asset] = lockVal;
+                if (!balances_.count(asset)) {
+                    balances_[asset] = lockVal;
+                }
+            }
+        }
+
+        std::cout << "[WALLET] Loaded balances from " << filename << "\n";
+        return true;
+
+    } catch (std::exception& e) {
+        std::cerr << "[WALLET] JSON parse error in " << filename << ": " 
+                  << e.what() << "\n";
+        return false;
     }
 }

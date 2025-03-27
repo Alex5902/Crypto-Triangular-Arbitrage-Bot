@@ -62,19 +62,29 @@ int main(int argc, char** argv) {
     double minProfit    = cfg.value("minProfitUSDT", 0.5);
     std::string pairsFile = cfg.value("pairsFile", "config/pairs.json");
 
-    // 1b) Load wallet from config
+    // 1b) Create wallet object
     Wallet wallet;
-    if (cfg.contains("walletInit") && cfg["walletInit"].is_object()) {
-        for (auto it = cfg["walletInit"].begin(); it != cfg["walletInit"].end(); ++it) {
-            std::string asset = it.key();
-            double amount     = it.value().get<double>();
-            wallet.setBalance(asset, amount);
-        }
+
+    // NEW: Attempt to load existing wallet data from disk
+    bool loadedFromDisk = wallet.loadFromFile("wallet.json");
+    if(loadedFromDisk) {
+        std::cout << "[MAIN] Loaded wallet from wallet.json successfully! Skipping config-based init.\n";
     } else {
-        // fallback
-        wallet.setBalance("BTC", 0.02);
-        wallet.setBalance("ETH", 0.5);
-        wallet.setBalance("USDT", 200.0);
+        std::cout << "[MAIN] No wallet.json found (or load failed). Using config-based init.\n";
+
+        // If "walletInit" is in config, use that. Otherwise fallback to defaults.
+        if (cfg.contains("walletInit") && cfg["walletInit"].is_object()) {
+            for (auto it = cfg["walletInit"].begin(); it != cfg["walletInit"].end(); ++it) {
+                std::string asset = it.key();
+                double amount     = it.value().get<double>();
+                wallet.setBalance(asset, amount);
+            }
+        } else {
+            // fallback
+            wallet.setBalance("BTC", 0.02);
+            wallet.setBalance("ETH", 0.5);
+            wallet.setBalance("USDT", 200.0);
+        }
     }
 
     std::cout << "[CONFIG] fee=" << fee

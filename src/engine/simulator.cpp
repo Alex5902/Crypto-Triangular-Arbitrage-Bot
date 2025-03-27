@@ -77,9 +77,6 @@ Simulator::Simulator(const std::string& logFileName,
     loadSymbolFilters("config/symbol_filters.json");
 }
 
-/**
- * Load minNotional / minQty info from JSON
- */
 void Simulator::loadSymbolFilters(const std::string& path)
 {
     std::ifstream f(path);
@@ -107,15 +104,11 @@ void Simulator::loadSymbolFilters(const std::string& path)
     }
 }
 
-/**
- * Check exchange filters for quantity and notional
- */
 bool Simulator::passesExchangeFilters(const std::string& symbol,
                                       double quantityBase,
                                       double priceEstimate)
 {
     if (symbolFilters_.count(symbol) == 0) {
-        // fallback if no data
         double notional = quantityBase * priceEstimate;
         if (notional < 10.0 || quantityBase < 0.0001) {
             std::cout << "[FILTER] " << symbol
@@ -151,9 +144,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              std::string* failReason /* = nullptr */)
 {
     // (1) We'll do a final "freshness" re-fetch for all 3 books right before Leg 1
-    //     to ensure the OB hasn't changed drastically
-
-    // fresh OB for leg1
     OrderBookData ob1 = (executor_? executor_->getOrderBookSnapshot(tri.path[0]) : ob1_initial);
     if(ob1.bids.empty() || ob1.asks.empty()){
         if(failReason) *failReason = "LEG1_EMPTY_OB";
@@ -161,7 +151,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         return false;
     }
 
-    // fresh OB for leg2
     OrderBookData ob2 = (executor_? executor_->getOrderBookSnapshot(tri.path[1]) : ob2_initial);
     if(ob2.bids.empty() || ob2.asks.empty()){
         if(failReason) *failReason = "LEG2_EMPTY_OB";
@@ -169,7 +158,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         return false;
     }
 
-    // fresh OB for leg3
     OrderBookData ob3 = (executor_? executor_->getOrderBookSnapshot(tri.path[2]) : ob3_initial);
     if(ob3.bids.empty() || ob3.asks.empty()){
         if(failReason) *failReason = "LEG3_EMPTY_OB";
@@ -177,7 +165,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         return false;
     }
 
-    // measure starting USDT
     double b1 = ob1.bids.empty() ? 0.0 : ob1.bids[0].price;
     double b2 = ob2.bids.empty() ? 0.0 : ob2.bids[0].price;
     double b3 = ob3.bids.empty() ? 0.0 : ob3.bids[0].price;
@@ -185,7 +172,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                       + wallet_->getFreeBalance("ETH") * b2
                       + wallet_->getFreeBalance("USDT");
 
-    // (2) Now re-check profitability with these fresh OBs
     double estProfitUSDT = estimateTriangleProfitUSDT(tri, ob1, ob2, ob3);
     if (estProfitUSDT < 0.0) {
         if(failReason) *failReason = "UNPROFITABLE_OR_FILL_FAIL";
@@ -198,8 +184,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                   << " < min=" << minProfitUSDT_ << " => skip.\n";
         return false;
     }
-
-    // Now proceed with normal 3-leg approach
 
     // lock all relevant assets
     std::vector<std::string> allAssets;
@@ -220,7 +204,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     }
 
     auto tx = wallet_->beginTransaction();
-    ReversibleLeg realLegs[3]; // track real fills
+    ReversibleLeg realLegs[3];
 
     // Leg 1
     if (!doLeg(tx, tri.path[0], ob1, &realLegs[0])) {
@@ -255,7 +239,6 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
         return false;
     }
 
-    // success => commit
     wallet_->commitTransaction(tx);
 
     double newValUSDT = wallet_->getFreeBalance("BTC") * b3
@@ -280,6 +263,14 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
               << " oldVal=" << oldValUSDT
               << " newVal=" << newValUSDT
               << " profit=" << profitPercent << "%\n";
+
+    // NEW: Save wallet after a successful trade
+    {
+        // Optional: Print a small log so we know it's saving
+        std::cout << "[SIM] Saving wallet to wallet.json\n";
+        wallet_->saveToFile("wallet.json");
+    }
+
     return true;
 }
 
@@ -292,17 +283,12 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob2_initial,
                                              const OrderBookData& ob3_initial)
 {
-    // Just call the new overload, but we don't capture any reason
     return simulateTradeDepthWithWallet(tri, ob1_initial, ob2_initial, ob3_initial,
                                         nullptr /* no reason needed */);
 }
 
-/**
- * Reverses a previously successful leg by placing an opposite market order
- */
 void Simulator::reverseRealLeg(const ReversibleLeg& leg)
 {
-    // We do a best effort. Could also fail or partially fill
     std::cout << "[SIM-REVERSAL] Attempting to reverse leg: symbol="
               << leg.symbol << (leg.sideSell ? " SELL " : " BUY ")
               << leg.filledQtyBase <<" base\n";
@@ -320,9 +306,6 @@ void Simulator::reverseRealLeg(const ReversibleLeg& leg)
               << " costOrProceeds=" << rev.costOrProceeds << "\n";
 }
 
-/**
- * doLeg => either local sim or doLegLive, plus optional reversal tracking
- */
 bool Simulator::doLeg(WalletTransaction& tx,
                       const std::string& pairName,
                       const OrderBookData& ob,
@@ -363,7 +346,6 @@ bool Simulator::doLeg(WalletTransaction& tx,
 
         bool ok = doLegLive(tx, pairName, desiredQtyBase, isSell);
         if (ok && realRec) {
-            // store fill info in realRec
             realRec->success       = true;
             realRec->symbol        = pairName;
             realRec->sideSell      = isSell;
@@ -372,7 +354,7 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return ok;
     }
 
-    // local sim logic
+    // local sim logic (unchanged)
     auto t0 = std::chrono::high_resolution_clock::now();
     auto [baseAsset, quoteAsset] = parseSymbol(pairName);
     if (quoteAsset=="UNKNOWN") {
@@ -413,7 +395,6 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return false;
     }
 
-    // partial fill across depth
     double filled=0.0, cost=0.0;
     const auto &levels = (isSell ? ob.bids : ob.asks);
     double remain = desiredQtyBase;
@@ -442,12 +423,10 @@ bool Simulator::doLeg(WalletTransaction& tx,
         return false;
     }
 
-    // apply fee
     double netCostOrProceeds = (isSell
                                 ? cost*(1.0 - feePercent_)
                                 : cost*(1.0 + feePercent_));
 
-    // local wallet update
     bool ok1=false, ok2=false;
     if (isSell) {
         ok1= wallet_->applyChange(tx, baseAsset,  -filled, 0.0);
@@ -476,9 +455,6 @@ bool Simulator::doLeg(WalletTransaction& tx,
     return true;
 }
 
-/**
- * For live trades => place real market order, apply local wallet changes
- */
 bool Simulator::doLegLive(WalletTransaction& tx,
                           const std::string& pairName,
                           double desiredQtyBase,
@@ -541,9 +517,6 @@ bool Simulator::doLegLive(WalletTransaction& tx,
     return true;
 }
 
-/**
- * A basic simulation function (unused/legacy).
- */
 double Simulator::simulateTrade(const Triangle&,
                                 double,
                                 double, double,
@@ -553,16 +526,10 @@ double Simulator::simulateTrade(const Triangle&,
     return 0.0;
 }
 
-/**
- * For debugging wallet
- */
 void Simulator::printWallet() const {
     wallet_->printAll();
 }
 
-/**
- * Log entire 3-leg triangle
- */
 void Simulator::logTrade(const std::string& path,
                          double startVal,
                          double endVal,
@@ -581,9 +548,6 @@ void Simulator::logTrade(const std::string& path,
          << profitPercent << "\n";
 }
 
-/**
- * Log details for each individual leg
- */
 void Simulator::logLeg(const std::string& pairName,
                        const std::string& side,
                        double requestedQty,
@@ -625,9 +589,6 @@ double Simulator::getCumulativeProfit() const {
     return cumulativeProfit_;
 }
 
-/**
- * parse out the 2 assets from a symbol
- */
 std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName) const {
     auto [b,q]= parseSymbol(pairName);
     if(q=="UNKNOWN"){
@@ -636,9 +597,6 @@ std::vector<std::string> Simulator::getAssetsForPair(const std::string& pairName
     return {b,q};
 }
 
-/**
- * concurrency-based scanning over many triangles
- */
 std::vector<SimCandidate> Simulator::simulateMultipleTrianglesConcurrently(
     const std::vector<Triangle>& triangles)
 {
@@ -651,7 +609,6 @@ std::vector<SimCandidate> Simulator::simulateMultipleTrianglesConcurrently(
             const auto& tri = triangles[i];
             if(tri.path.size()<3) return -999.0;
 
-            // fetch fresh OB
             OrderBookData ob1, ob2, ob3;
             if(executor_){
                 ob1 = executor_->getOrderBookSnapshot(tri.path[0]);
@@ -677,9 +634,6 @@ std::vector<SimCandidate> Simulator::simulateMultipleTrianglesConcurrently(
     return results;
 }
 
-/**
- * Execute top N in order
- */
 void Simulator::executeTopCandidatesSequentially(const std::vector<Triangle>& triangles,
                                                  const std::vector<SimCandidate>& simCandidates,
                                                  int bestN,
@@ -700,7 +654,6 @@ void Simulator::executeTopCandidatesSequentially(const std::vector<Triangle>& tr
         if(idx<0 || idx>=(int)triangles.size()) continue;
         const auto& tri = triangles[idx];
 
-        // fetch fresh OB for each leg
         OrderBookData ob1, ob2, ob3;
         if(executor_){
             ob1= executor_->getOrderBookSnapshot(tri.path[0]);
@@ -722,7 +675,7 @@ void Simulator::executeTopCandidatesSequentially(const std::vector<Triangle>& tr
             continue;
         }
 
-        bool ok = simulateTradeDepthWithWallet(tri, ob1, ob2, ob3, nullptr);
+        bool ok= simulateTradeDepthWithWallet(tri, ob1, ob2, ob3, nullptr);
         if(ok){
             std::cout<<"[EXEC] trade triIdx="<< idx <<" => done.\n";
         } else {
@@ -732,9 +685,6 @@ void Simulator::executeTopCandidatesSequentially(const std::vector<Triangle>& tr
     }
 }
 
-/**
- * CSV export of candidate results
- */
 void Simulator::exportSimCandidatesCSV(const std::string& filename,
                                        const std::vector<Triangle>& triangles,
                                        const std::vector<SimCandidate>& candidates,
@@ -758,8 +708,8 @@ void Simulator::exportSimCandidatesCSV(const std::string& filename,
     }
 
     auto now = std::chrono::system_clock::now();
-    auto now_c= std::chrono::system_clock::to_time_t(now);
-    std::string nowStr= std::ctime(&now_c);
+    auto now_c= std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    std::string nowStr= std::ctime((const time_t*)&now_c);
     if(!nowStr.empty() && nowStr.back()=='\n') nowStr.pop_back();
 
     int rank=1;
@@ -783,17 +733,11 @@ void Simulator::exportSimCandidatesCSV(const std::string& filename,
              <<" candidates to "<< filename <<"\n";
 }
 
-/**
- * Implementation for "estimateTriangleProfitUSDT(...)"
- * We'll do a partial-fill "fake wallet" approach for each leg, 
- * returning -1.0 if any leg can't fill or is unprofitable.
- */
 double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
                                              const OrderBookData& ob1,
                                              const OrderBookData& ob2,
                                              const OrderBookData& ob3)
 {
-    // approximate oldValUSDT
     double b1 = (ob1.bids.empty()? 0.0 : ob1.bids[0].price);
     double b2 = (ob2.bids.empty()? 0.0 : ob2.bids[0].price);
     double b3 = (ob3.bids.empty()? 0.0 : ob3.bids[0].price);
@@ -801,40 +745,33 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
     double oldValUSDT = wallet_->getFreeBalance("USDT")
                       + wallet_->getFreeBalance("BTC") * b1
                       + wallet_->getFreeBalance("ETH") * b2;
-    // If you also have BNB, etc. you can add it here for a more thorough estimate
 
-    // local "fake" copies
     double fakeUSDT = wallet_->getFreeBalance("USDT");
     double fakeBTC  = wallet_->getFreeBalance("BTC");
     double fakeETH  = wallet_->getFreeBalance("ETH");
 
-    // We'll reuse partial-fill logic from doLeg but on local doubles
     auto simulateLegFake = [&](const std::string &symbol, const OrderBookData &ob)->bool {
         auto [baseAsset, quoteAsset] = parseSymbol(symbol);
         if (quoteAsset=="UNKNOWN") return false;
 
-        bool isSell = (quoteAsset=="USDT"||quoteAsset=="BTC"||
-                       quoteAsset=="BUSD"||quoteAsset=="ETH");
+        bool isSell = (quoteAsset=="USDT"||quoteAsset=="BTC"||quoteAsset=="BUSD"||quoteAsset=="ETH");
 
         double bestPx=0.0;
         if(isSell && !ob.bids.empty()) bestPx= ob.bids[0].price;
         else if(!isSell && !ob.asks.empty()) bestPx= ob.asks[0].price;
         if(bestPx<=0.0) return false;
 
-        // fraction approach
         double fraction= maxFractionPerTrade_;
         double freeAmt=0.0;
         double desiredQtyBase=0.0;
 
         if(isSell){
-            // base = BTC or ETH, etc.
             if(baseAsset=="BTC") freeAmt= fakeBTC;
             else if(baseAsset=="ETH") freeAmt= fakeETH;
             if(freeAmt<=1e-12) return false;
 
             desiredQtyBase= freeAmt * fraction;
         } else {
-            // we buy base => we have quote
             if(quoteAsset=="USDT") freeAmt= fakeUSDT;
             else if(quoteAsset=="BTC") freeAmt= fakeBTC;
             else if(quoteAsset=="ETH") freeAmt= fakeETH;
@@ -846,12 +783,10 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
             desiredQtyBase= rawSpend / bestPx;
         }
 
-        // check filters
         if(!passesExchangeFilters(symbol, desiredQtyBase, bestPx)){
             return false;
         }
 
-        // partial fill
         double filled=0.0, cost=0.0;
         const auto &levels= (isSell? ob.bids : ob.asks);
         double remain= desiredQtyBase;
@@ -872,10 +807,8 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
         double slip= std::fabs(avgPx- bestPx)/ bestPx;
         if(slip> slippageTolerance_) return false;
 
-        // apply fee
         if(isSell){
             double netProceeds= cost*(1.0 - feePercent_);
-            // update fake
             if(baseAsset=="BTC") fakeBTC -= filled;
             else if(baseAsset=="ETH") fakeETH -= filled;
 
@@ -891,16 +824,13 @@ double Simulator::estimateTriangleProfitUSDT(const Triangle& tri,
             if(baseAsset=="BTC") fakeBTC += filled;
             else if(baseAsset=="ETH") fakeETH += filled;
         }
-
         return true;
     };
 
-    // do the 3 legs in "fake" mode
     if(!simulateLegFake(tri.path[0], ob1)) return -1.0;
     if(!simulateLegFake(tri.path[1], ob2)) return -1.0;
     if(!simulateLegFake(tri.path[2], ob3)) return -1.0;
 
-    // final
     double finalValUSDT= fakeUSDT + (fakeBTC * b3) + (fakeETH * b2);
     double netProfit= finalValUSDT - oldValUSDT;
     return netProfit;

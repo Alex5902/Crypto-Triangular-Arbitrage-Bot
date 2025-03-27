@@ -43,12 +43,11 @@ struct ReversibleLeg {
 
 /**
  * Depth-aware simulator with optional live trades.
- * 
  * Includes concurrency methods for multi-triangle simulation.
- * Now includes a more robust "atomic" execution approach:
- * - If any leg fails, we attempt to revert or skip the entire trade.
- * - For real trades, we do a best-effort approach, but cannot truly revert
- *   a partially filled exchange order.
+ * 
+ * Now includes:
+ *  - A more robust "atomic" execution approach
+ *  - After each successful trade, we automatically save the wallet to "wallet.json"
  */
 class Simulator {
 public:
@@ -70,13 +69,13 @@ public:
      * Real exchange trades can't be undone, so in a real scenario you'd do a "reversal" trade
      * if Leg 2 or 3 fails. See code comments below.
      * 
-     * NEW: If you want the reason for a failure, pass a pointer to failReason.
+     * If you want the reason for a failure, pass a pointer to failReason.
      */
     bool simulateTradeDepthWithWallet(const Triangle& tri,
                                       const OrderBookData& ob1,
                                       const OrderBookData& ob2,
                                       const OrderBookData& ob3,
-                                      std::string* failReason = nullptr); // UPDATED
+                                      std::string* failReason = nullptr); // NEW overload
 
     /**
      * Old signature for backward compatibility. Internally calls the new one without failReason.
