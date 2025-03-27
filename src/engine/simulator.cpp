@@ -141,14 +141,14 @@ bool Simulator::passesExchangeFilters(const std::string& symbol,
     return true;
 }
 
-/**
- * Attempt the entire 3-leg triangle in a local transaction, with a real-time re-check
- * of the order books right before Leg 1. If the re-check is no longer profitable, skip.
- */
+//-------------------------------------------------------------
+// NEW Overload: If you want a reason for failure, pass failReason
+//-------------------------------------------------------------
 bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
                                              const OrderBookData& ob1_initial,
                                              const OrderBookData& ob2_initial,
-                                             const OrderBookData& ob3_initial)
+                                             const OrderBookData& ob3_initial,
+                                             std::string* failReason /* = nullptr */)
 {
     // (1) We'll do a final "freshness" re-fetch for all 3 books right before Leg 1
     //     to ensure the OB hasn't changed drastically
@@ -156,6 +156,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     // fresh OB for leg1
     OrderBookData ob1 = (executor_? executor_->getOrderBookSnapshot(tri.path[0]) : ob1_initial);
     if(ob1.bids.empty() || ob1.asks.empty()){
+        if(failReason) *failReason = "LEG1_EMPTY_OB";
         std::cout<<"[SIM] Leg1 fresh OB is empty => skip.\n";
         return false;
     }
@@ -163,6 +164,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     // fresh OB for leg2
     OrderBookData ob2 = (executor_? executor_->getOrderBookSnapshot(tri.path[1]) : ob2_initial);
     if(ob2.bids.empty() || ob2.asks.empty()){
+        if(failReason) *failReason = "LEG2_EMPTY_OB";
         std::cout<<"[SIM] Leg2 fresh OB is empty => skip.\n";
         return false;
     }
@@ -170,6 +172,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     // fresh OB for leg3
     OrderBookData ob3 = (executor_? executor_->getOrderBookSnapshot(tri.path[2]) : ob3_initial);
     if(ob3.bids.empty() || ob3.asks.empty()){
+        if(failReason) *failReason = "LEG3_EMPTY_OB";
         std::cout<<"[SIM] Leg3 fresh OB is empty => skip.\n";
         return false;
     }
@@ -185,10 +188,12 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
     // (2) Now re-check profitability with these fresh OBs
     double estProfitUSDT = estimateTriangleProfitUSDT(tri, ob1, ob2, ob3);
     if (estProfitUSDT < 0.0) {
+        if(failReason) *failReason = "UNPROFITABLE_OR_FILL_FAIL";
         std::cout << "[SIM] Real-time re-check => unprofitable or fill fail => skip.\n";
         return false;
     }
     if (estProfitUSDT < minProfitUSDT_) {
+        if(failReason) *failReason = "BELOW_MIN_PROFIT_USDT";
         std::cout << "[SIM] Real-time re-check => estProfit=" << estProfitUSDT
                   << " < min=" << minProfitUSDT_ << " => skip.\n";
         return false;
@@ -219,6 +224,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
 
     // Leg 1
     if (!doLeg(tx, tri.path[0], ob1, &realLegs[0])) {
+        if(failReason) *failReason = "LEG1_FAIL";
         std::cout << "[SIM] Leg1 failed => rollback.\n";
         wallet_->rollbackTransaction(tx);
         return false;
@@ -226,6 +232,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
 
     // Leg 2
     if (!doLeg(tx, tri.path[1], ob2, &realLegs[1])) {
+        if(failReason) *failReason = "LEG2_FAIL";
         std::cout << "[SIM] Leg2 failed => reversing Leg1 if live.\n";
         if (liveMode_ && realLegs[0].success) {
             reverseRealLeg(realLegs[0]);
@@ -236,6 +243,7 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
 
     // Leg 3
     if (!doLeg(tx, tri.path[2], ob3, &realLegs[2])) {
+        if(failReason) *failReason = "LEG3_FAIL";
         std::cout << "[SIM] Leg3 failed => reversing Leg2 & Leg1 if live.\n";
         if (liveMode_ && realLegs[1].success) {
             reverseRealLeg(realLegs[1]);
@@ -273,6 +281,20 @@ bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
               << " newVal=" << newValUSDT
               << " profit=" << profitPercent << "%\n";
     return true;
+}
+
+//-------------------------------------------------------------
+// OLD method signature (unchanged lines)
+// We forward to the new method with failReason = nullptr
+//-------------------------------------------------------------
+bool Simulator::simulateTradeDepthWithWallet(const Triangle& tri,
+                                             const OrderBookData& ob1_initial,
+                                             const OrderBookData& ob2_initial,
+                                             const OrderBookData& ob3_initial)
+{
+    // Just call the new overload, but we don't capture any reason
+    return simulateTradeDepthWithWallet(tri, ob1_initial, ob2_initial, ob3_initial,
+                                        nullptr /* no reason needed */);
 }
 
 /**
@@ -700,7 +722,7 @@ void Simulator::executeTopCandidatesSequentially(const std::vector<Triangle>& tr
             continue;
         }
 
-        bool ok= simulateTradeDepthWithWallet(tri, ob1, ob2, ob3);
+        bool ok = simulateTradeDepthWithWallet(tri, ob1, ob2, ob3, nullptr);
         if(ok){
             std::cout<<"[EXEC] trade triIdx="<< idx <<" => done.\n";
         } else {

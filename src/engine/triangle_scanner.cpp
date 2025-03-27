@@ -255,14 +255,23 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
     futs.reserve(limit);
     for (int i=0; i<limit; i++){
         int triIdx = allTris[i];
+
+        // NEW: skip blacklisted triangles altogether
+        if(isBlacklisted(triangles_[triIdx])) {  
+            // just set a dummy profit so it won't trigger
+            futs.push_back(pool_.submit([](){ return -999.0; }));
+            continue;
+        }
+
         futs.push_back(pool_.submit([this, triIdx](){
             return calculateProfit(triangles_[triIdx]);
         }));
     }
 
     std::vector<double> profits(limit);
+    int futIndex = 0;
     for(int i=0; i<limit; i++){
-        profits[i] = futs[i].get();
+        profits[i] = futs[futIndex++].get();
     }
 
     double bestProfit= -999.0;
@@ -304,7 +313,6 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
                 // COOLDOWN CHECK
                 std::string triKey = makeTriangleKey(tri);
 
-                // lock + check
                 {
                     std::lock_guard<std::mutex> cdLock(cooldownMutex_);
                     auto now = std::chrono::steady_clock::now();
@@ -324,13 +332,20 @@ void TriangleScanner::scanTrianglesForSymbol(const std::string& symbol) {
                             return;
                         }
                     }
-                    // if not on cooldown => we proceed + set lastAttemptMap_
+                    // not on cooldown => we proceed
                     lastAttemptMap_[triKey] = now;
                 }
 
                 // Now we actually do the trade
                 std::cout<<"[SIMULATE] => +"<< estProfitUSDT <<" USDT => do real trade.\n";
-                simulator_->simulateTradeDepthWithWallet(tri, ob1, ob2, ob3);
+
+                // NEW: capture fail reason
+                std::string failReason;
+                bool success = simulator_->simulateTradeDepthWithWallet(tri, ob1, ob2, ob3, &failReason);
+                if(!success){
+                    // record the failure in blacklisting
+                    recordFailure(tri, failReason.empty()? "unknown_fail" : failReason); // NEW
+                }
                 simulator_->printWallet();
             }
         }
@@ -356,7 +371,6 @@ double TriangleScanner::calculateProfit(const Triangle& tri) {
 
     for(int leg=0; leg<3; leg++){
         const std::string& sym = tri.path[leg];
-        // Is reversed?
         bool isReversed = false;
         std::string rawSym = sym;
         if(sym.size()>=4) {
@@ -369,7 +383,6 @@ double TriangleScanner::calculateProfit(const Triangle& tri) {
             }
         }
 
-        // get orderbook
         auto ob = obm_->getOrderBook(rawSym);
         if(ob.bids.empty()|| ob.asks.empty()){
             return -999; 
@@ -439,6 +452,7 @@ void TriangleScanner::logScanResult(const std::string& symbol,
 
 void TriangleScanner::updateTrianglePriority(int triIdx, double profit) {
     std::lock_guard<std::mutex> lk(bestTriMutex_);
+    if(triIdx<0 || triIdx>=(int)triangles_.size()) return;
     lastProfits_[triIdx] = profit;
     TriPriority item;
     item.profit = profit;
@@ -452,12 +466,10 @@ bool TriangleScanner::getBestTriangle(double& outProfit, Triangle& outTri) {
         TriPriority top = bestTriangles_.top();
         double stored = lastProfits_[top.triIdx];
         if(std::fabs(stored - top.profit)<1e-12){
-            // up to date
             outProfit = stored;
             outTri    = triangles_[ top.triIdx ];
             return true;
         } else {
-            // stale => pop
             bestTriangles_.pop();
         }
     }
@@ -505,7 +517,6 @@ void TriangleScanner::rescoreAllTrianglesConcurrently(
         }
     }
 
-    // optional sorted output
     if(outSorted){
         outSorted->clear();
         outSorted->reserve(triangles_.size());
@@ -573,6 +584,7 @@ void TriangleScanner::exportTopTrianglesCSV(const std::string& filename,
 
     int rank=1;
     for(auto& sc: results){
+        if(sc.triIdx<0 || sc.triIdx>=(int)triangles_.size()) continue;
         auto& tri = triangles_[ sc.triIdx ];
         std::stringstream pathStr;
         for(size_t i=0; i< tri.path.size(); i++){
@@ -592,13 +604,68 @@ void TriangleScanner::exportTopTrianglesCSV(const std::string& filename,
 
 // NEW: make a unique string key from tri.path
 std::string TriangleScanner::makeTriangleKey(const Triangle& tri) const {
-    // e.g. "BTCUSDT_FWD->ETHUSDT_INV->XRPBTC_FWD"
-    // or just "BTC->ETH->USDT" if you prefer ignoring _FWD/_INV
-    // We'll keep it consistent with tri.path though
     std::ostringstream oss;
     for(size_t i=0; i< tri.path.size(); i++){
         if(i>0) oss<<"->";
         oss<< tri.path[i];
     }
     return oss.str();
+}
+
+// --------------------------------------------------------------------------
+// NEW: record a failure => push a timestamp, prune old fails, log reason
+// --------------------------------------------------------------------------
+void TriangleScanner::recordFailure(const Triangle& tri, const std::string& reason)
+{
+    // log to fail_log.csv
+    logFailure(tri, reason);
+
+    // store time
+    auto now = std::chrono::steady_clock::now();
+    std::string key = makeTriangleKey(tri);
+
+    std::lock_guard<std::mutex> g(failMutex_);
+    auto& times = failTimestamps_[key];
+    times.push_back(now);
+
+    // prune old
+    times.erase(std::remove_if(times.begin(), times.end(),
+                               [&](auto& tstamp){
+                                   double sec = std::chrono::duration<double>(now - tstamp).count();
+                                   return (sec > failWindowSec_);
+                               }),
+                times.end());
+}
+
+bool TriangleScanner::isBlacklisted(const Triangle& tri)
+{
+    std::string key = makeTriangleKey(tri);
+    std::lock_guard<std::mutex> g(failMutex_);
+    if(!failTimestamps_.count(key)) return false;
+
+    auto& times = failTimestamps_[key];
+    // times already pruned on each fail, so if we exceed maxFailsInWindow_, it's blacklisted
+    return (int)times.size() >= maxFailsInWindow_;
+}
+
+void TriangleScanner::logFailure(const Triangle& tri, const std::string& reason)
+{
+    static bool header = false;
+    static std::mutex failLogMu;
+    std::lock_guard<std::mutex> lock(failLogMu);
+
+    std::ofstream f("fail_log.csv", std::ios::app);
+    if(!f.is_open()) return;
+
+    if(!header){
+        f << "timestamp,triangleKey,reason\n";
+        header=true;
+    }
+    auto now = std::chrono::system_clock::now();
+    auto nc= std::chrono::system_clock::to_time_t(now);
+    auto triKey = makeTriangleKey(tri);
+
+    f << std::put_time(std::localtime(&nc), "%F %T") << ","
+      << triKey << ","
+      << reason << "\n";
 }

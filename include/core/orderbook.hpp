@@ -35,8 +35,17 @@ public:
     OrderBookData getOrderBook(const std::string& symbol);
 
     // NEW => single combined WebSocket approach
-    // We'll gather all symbols from 'start(symbol)' calls, then open one connection
+    // We'll gather all symbols from 'start(symbol)' calls, then open one or more connections
     void startCombinedWebSocket();
+
+    /**
+     * NEW: Check if an order book is stale. If the last message was more than
+     *      `maxStaleMs` milliseconds ago, we consider it stale.
+     * @param symbol The symbol to check (e.g. "BTCUSDT").
+     * @param maxStaleMs The maximum staleness in milliseconds (default 500).
+     * @return true if stale or if we have no record of this symbol, false otherwise.
+     */
+    bool isStale(const std::string& symbol, double maxStaleMs = 500.0) const; // ADDED
 
 private:
     // Old approach => per-symbol
@@ -59,10 +68,13 @@ private:
     // For single-WS-per-symbol approach
     std::unordered_map<std::string, std::thread> threads_;
 
-    // For combined approach, you might keep 1 or more threads labeled "__combined__"
-    // or chunk them. That's an implementation detail.
+    // For combined approach, we might open multiple websockets if we have many symbols
 
-    std::mutex globalMutex_;
+    /**
+     * NOTE: We make this mutable so that isStale(...) can lock it even though isStale is const.
+     */
+    mutable std::mutex globalMutex_;
+
     std::atomic<bool> running_;
 
     TriangleScanner* scanner_;

@@ -111,8 +111,27 @@ private:
 
     void updateTrianglePriority(int triIdx, double profit);
 
-    // Helper: Build a unique string key for a triangle path
     std::string makeTriangleKey(const Triangle& tri) const;
+
+    // -----------------------------------------------------------------------
+    // NEW: Data + methods for blacklisting repeated failures
+    // -----------------------------------------------------------------------
+private:
+    // track # of recent fails for each triangle
+    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> failTimestamps_;  // NEW
+    int maxFailsInWindow_{3};    // e.g. 3 fails in the last 60s => blacklisted  // NEW
+    double failWindowSec_{60.0}; // e.g. 60s time window                        // NEW
+    std::mutex failMutex_;       // for concurrent writes to failTimestamps_    // NEW
+
+    // Record a failure for tri => push back current time, prune old entries   // NEW
+    void recordFailure(const Triangle& tri, const std::string& reason);        // NEW
+
+    // Check if a triangle is currently blacklisted (exceeded fail threshold)  // NEW
+    bool isBlacklisted(const Triangle& tri);                                   // NEW
+
+    // Log each failure reason to a CSV for debugging
+    void logFailure(const Triangle& tri, const std::string& reason);           // NEW
+
 
 private:
     OrderBookManager* obm_{nullptr};
